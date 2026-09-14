@@ -1,19 +1,41 @@
+//! Types shared by more than one command module.
+//!
+//! Anything used by a single module lives in that module instead — the server's
+//! envelopes are inconsistent enough (`{robots}`, `{data}`, `{sessions}`, bare
+//! arrays, flat objects) that a shared struct per endpoint was doing more harm
+//! than good.
+
 use serde::{Deserialize, Serialize};
 
-// ── Pagination ──────────────────────────────────────────────────────
-
-#[derive(Debug, Deserialize, Serialize)]
+/// Pagination envelope.
+///
+/// Every field is optional and defaulted because the server does not agree with
+/// itself: most routes send `pageSize`, `/datasets` and the history routes send
+/// `limit`, and a few omit `totalPages`.
+#[derive(Debug, Deserialize, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct Pagination {
-    pub page: u32,
     #[serde(default)]
-    pub page_size: u32,
-    pub total: u32,
+    pub page: Option<u32>,
+    #[serde(default, alias = "limit")]
+    pub page_size: Option<u32>,
     #[serde(default)]
-    pub total_pages: u32,
+    pub total: Option<u32>,
+    #[serde(default)]
+    pub total_pages: Option<u32>,
 }
 
-// ── Robots ──────────────────────────────────────────────────────────
+impl Pagination {
+    pub fn total(&self) -> Option<u32> {
+        self.total
+    }
+    pub fn total_pages(&self) -> Option<u32> {
+        self.total_pages
+    }
+}
+
+// ── Robots ──────────────────────────────────────────────────────────────
+// Used by `robots` and by the `status` dashboard.
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -38,55 +60,96 @@ pub struct Robot {
     #[serde(default)]
     pub firmware: Option<String>,
     #[serde(default)]
-    pub is_connected: Option<bool>,
-    #[serde(default)]
-    pub base_url: Option<String>,
-    #[serde(default)]
     pub capabilities: Option<serde_json::Value>,
+    /// The agent URL. `baseUrl` is what POST /robots/register returns; the
+    /// list and detail routes call the same thing `a2aAgentUrl`.
+    #[serde(default, alias = "baseUrl")]
+    pub a2a_agent_url: Option<String>,
+    #[serde(default)]
+    pub a2a_enabled: Option<bool>,
+    #[serde(default)]
+    pub current_task_id: Option<String>,
+    #[serde(default)]
+    pub current_task_name: Option<String>,
+    #[serde(default)]
+    pub metadata: Option<serde_json::Value>,
+    #[serde(default)]
+    pub created_at: Option<String>,
+    #[serde(default)]
+    pub updated_at: Option<String>,
+}
+
+impl Robot {
+    pub fn zone(&self) -> Option<&str> {
+        self.location.as_ref()?.get("zone")?.as_str()
+    }
+    pub fn floor(&self) -> Option<&str> {
+        self.location.as_ref()?.get("floor")?.as_str()
+    }
+    /// How a robot's state should be bucketed on the fleet dashboard.
+    pub fn health(&self) -> RobotHealth {
+        match self
+            .status
+            .as_deref()
+            .unwrap_or("unknown")
+            .to_lowercase()
+            .as_str()
+        {
+            "emergency_stop" | "estop" | "e_stop" | "protective_stop" | "safety_stop" => {
+                RobotHealth::Stopped
+            }
+            "online" | "active" | "connected" | "idle" | "ready" => RobotHealth::Online,
+            "busy" | "running" | "charging" | "moving" | "executing" | "manual" | "teleop" => {
+                RobotHealth::Working
+            }
+            "error" | "failed" | "degraded" => RobotHealth::Error,
+            "offline" | "disconnected" => RobotHealth::Offline,
+            _ => RobotHealth::Other,
+        }
+    }
+}
+
+/// Buckets for the fleet overview.
+///
+/// `Stopped` and `Working` exist because the old dashboard folded every state
+/// it did not recognise into "Other" and then counted availability as
+/// `online / total` — a fleet with a latched E-stop read as merely idle.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum RobotHealth {
+    Online,
+    Working,
+    Stopped,
+    Error,
+    Offline,
+    Other,
+}
+
+impl RobotHealth {
+    /// Counts toward availability: reachable and not latched.
+    pub fn is_available(&self) -> bool {
+        matches!(self, RobotHealth::Online | RobotHealth::Working)
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RobotsResponse {
     pub robots: Vec<Robot>,
     #[serde(default)]
     pub pagination: Option<Pagination>,
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RegisterRequest {
-    pub robot_url: String,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-pub struct RegisterResponse {
-    pub robot: Robot,
-    #[serde(default)]
-    pub endpoints: Option<serde_json::Value>,
-    #[serde(default)]
-    pub agent_card: Option<serde_json::Value>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct CommandRequest {
-    pub r#type: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub payload: Option<serde_json::Value>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-pub struct DeleteResponse {
-    pub success: bool,
-}
-
-// ── Alerts ──────────────────────────────────────────────────────────
+// ── Alerts ──────────────────────────────────────────────────────────────
+// Used by `alerts` and by the `status` dashboard.
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Alert {
     pub id: String,
-    pub severity: String,
-    pub title: String,
+    #[serde(default)]
+    pub severity: Option<String>,
+    #[serde(default)]
+    pub title: Option<String>,
     #[serde(default)]
     pub message: Option<String>,
     #[serde(default)]
@@ -96,18 +159,25 @@ pub struct Alert {
     #[serde(default)]
     pub acknowledged: Option<bool>,
     #[serde(default)]
-    pub created_at: Option<String>,
+    pub acknowledged_by: Option<String>,
+    /// The server names this `timestamp`; `createdAt` is accepted so older
+    /// payloads still read.
+    #[serde(default, alias = "createdAt")]
+    pub timestamp: Option<String>,
 }
 
+/// `GET /api/alerts` wraps its rows in `data`, not `alerts`.
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AlertsResponse {
-    #[serde(alias = "data")]
-    pub alerts: Vec<Alert>,
+    #[serde(default, alias = "alerts")]
+    pub data: Vec<Alert>,
     #[serde(default)]
     pub pagination: Option<Pagination>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct AlertCounts {
     #[serde(default)]
     pub critical: u32,
@@ -119,357 +189,113 @@ pub struct AlertCounts {
     pub info: u32,
 }
 
+impl AlertCounts {
+    pub fn total(&self) -> u32 {
+        self.critical + self.error + self.warning + self.info
+    }
+}
+
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AlertCountsResponse {
+    #[serde(default)]
     pub counts: AlertCounts,
 }
 
-// ── Datasets ────────────────────────────────────────────────────────
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Dataset {
-    pub id: String,
-    #[serde(default)]
-    pub name: Option<String>,
-    #[serde(default)]
-    pub status: Option<String>,
-    #[serde(default)]
-    pub demonstration_count: Option<u32>,
-    #[serde(default)]
-    pub total_frames: Option<u64>,
-    #[serde(default)]
-    pub fps: Option<f64>,
-    #[serde(default)]
-    pub robot_type_id: Option<String>,
-    #[serde(default)]
-    pub skill_id: Option<String>,
-    #[serde(default)]
-    pub quality_score: Option<f64>,
-    #[serde(default)]
-    pub created_at: Option<String>,
-    #[serde(default)]
-    pub updated_at: Option<String>,
-    #[serde(default)]
-    pub description: Option<String>,
-}
+    fn robot_with(status: &str) -> Robot {
+        serde_json::from_value(serde_json::json!({ "id": "r1", "status": status })).unwrap()
+    }
 
-#[derive(Debug, Deserialize, Serialize)]
-pub struct DatasetsResponse {
-    pub datasets: Vec<Dataset>,
-    #[serde(default)]
-    pub pagination: Option<Pagination>,
-}
+    /// The fleet dashboard folded every status it did not recognise into
+    /// "Other" and computed availability as `online / total`, so a robot held
+    /// in protective stop read as merely idle.
+    #[test]
+    fn safety_stops_are_never_available() {
+        for s in [
+            "emergency_stop",
+            "estop",
+            "e_stop",
+            "protective_stop",
+            "safety_stop",
+        ] {
+            let h = robot_with(s).health();
+            assert_eq!(h, RobotHealth::Stopped, "{s} should bucket as Stopped");
+            assert!(!h.is_available(), "{s} must not count as available");
+        }
+    }
 
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DatasetEpisode {
-    #[serde(default)]
-    pub index: Option<u32>,
-    #[serde(default)]
-    pub frame_count: Option<u32>,
-    #[serde(default)]
-    pub duration_seconds: Option<f64>,
-    #[serde(default)]
-    pub flagged: Option<bool>,
-}
+    #[test]
+    fn working_states_are_available_but_distinct_from_idle() {
+        for s in ["busy", "running", "charging", "moving", "teleop"] {
+            let h = robot_with(s).health();
+            assert_eq!(h, RobotHealth::Working, "{s} should bucket as Working");
+            assert!(h.is_available());
+        }
+        assert_eq!(robot_with("online").health(), RobotHealth::Online);
+        assert!(robot_with("online").health().is_available());
+    }
 
-#[derive(Debug, Deserialize, Serialize)]
-pub struct DatasetEpisodesResponse {
-    pub episodes: Vec<DatasetEpisode>,
-}
+    #[test]
+    fn faults_and_absence_are_not_available() {
+        assert_eq!(robot_with("error").health(), RobotHealth::Error);
+        assert_eq!(robot_with("offline").health(), RobotHealth::Offline);
+        assert!(!robot_with("error").health().is_available());
+        assert!(!robot_with("offline").health().is_available());
+        assert!(!robot_with("wat").health().is_available());
+    }
 
-// ── Training ────────────────────────────────────────────────────────
+    #[test]
+    fn status_matching_is_case_insensitive() {
+        assert_eq!(robot_with("PROTECTIVE_STOP").health(), RobotHealth::Stopped);
+        assert_eq!(robot_with("Online").health(), RobotHealth::Online);
+    }
 
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TrainingJob {
-    pub id: String,
-    #[serde(default)]
-    pub status: Option<String>,
-    #[serde(default)]
-    pub base_model: Option<String>,
-    #[serde(default)]
-    pub fine_tune_method: Option<String>,
-    #[serde(default)]
-    pub dataset_id: Option<String>,
-    #[serde(default)]
-    pub progress: Option<f64>,
-    #[serde(default)]
-    pub current_epoch: Option<u32>,
-    #[serde(default)]
-    pub total_epochs: Option<u32>,
-    #[serde(default)]
-    pub current_loss: Option<f64>,
-    #[serde(default)]
-    pub learning_rate: Option<f64>,
-    #[serde(default)]
-    pub created_at: Option<String>,
-    #[serde(default)]
-    pub started_at: Option<String>,
-    #[serde(default)]
-    pub completed_at: Option<String>,
-    #[serde(default)]
-    pub error: Option<String>,
-}
+    /// A missing field must never be a hard parse failure: the server drops
+    /// keys freely and the CLI has to keep rendering.
+    #[test]
+    fn a_robot_needs_only_an_id() {
+        let r: Robot = serde_json::from_value(serde_json::json!({ "id": "r1" })).unwrap();
+        assert_eq!(r.health(), RobotHealth::Other);
+        assert_eq!(r.zone(), None);
+        assert_eq!(r.name, None);
+    }
 
-#[derive(Debug, Deserialize, Serialize)]
-pub struct TrainingJobsResponse {
-    pub jobs: Vec<TrainingJob>,
-    #[serde(default)]
-    pub pagination: Option<Pagination>,
-}
+    /// `/datasets` names the page size `limit`; everything else says `pageSize`.
+    #[test]
+    fn pagination_accepts_both_page_size_spellings() {
+        let a: Pagination =
+            serde_json::from_value(serde_json::json!({"page":1,"pageSize":50,"total":75})).unwrap();
+        let b: Pagination =
+            serde_json::from_value(serde_json::json!({"page":1,"limit":20,"total":14})).unwrap();
+        assert_eq!(a.page_size, Some(50));
+        assert_eq!(b.page_size, Some(20));
+        assert_eq!(a.total(), Some(75));
+    }
 
-#[derive(Debug, Deserialize, Serialize)]
-pub struct TrainingActiveResponse {
-    pub jobs: Vec<TrainingJob>,
-    #[serde(default)]
-    pub count: Option<u32>,
-}
+    /// `/alerts` returns its rows under `data`, not `alerts`.
+    #[test]
+    fn alerts_envelope_reads_data_and_timestamp() {
+        let r: AlertsResponse = serde_json::from_value(serde_json::json!({
+            "data": [{"id":"a1","severity":"warning","title":"x","timestamp":"2026-01-01T00:00:00Z"}],
+            "pagination": {"page":1,"pageSize":50,"total":75,"totalPages":2}
+        }))
+        .unwrap();
+        assert_eq!(r.data.len(), 1);
+        assert_eq!(r.data[0].timestamp.as_deref(), Some("2026-01-01T00:00:00Z"));
+        assert_eq!(r.pagination.unwrap().total_pages(), Some(2));
+    }
 
-#[derive(Debug, Deserialize, Serialize)]
-pub struct TrainingJobDetailResponse {
-    pub job: TrainingJob,
-    #[serde(default)]
-    pub progress: Option<serde_json::Value>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-pub struct QueueStats {
-    #[serde(default)]
-    pub pending: Option<u32>,
-    #[serde(default)]
-    pub active: Option<u32>,
-    #[serde(default)]
-    pub completed: Option<u32>,
-    #[serde(default)]
-    pub failed: Option<u32>,
-}
-
-// ── Models ──────────────────────────────────────────────────────────
-
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RegisteredModel {
-    #[serde(default)]
-    pub name: Option<String>,
-    #[serde(default)]
-    pub creation_timestamp: Option<serde_json::Value>,
-    #[serde(default)]
-    pub last_updated_timestamp: Option<serde_json::Value>,
-    #[serde(default, alias = "latestVersions")]
-    pub latest_versions: Option<Vec<ModelVersion>>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ModelVersion {
-    #[serde(default)]
-    pub version: Option<String>,
-    #[serde(default)]
-    pub current_stage: Option<String>,
-    #[serde(default)]
-    pub source: Option<String>,
-    #[serde(default)]
-    pub run_id: Option<String>,
-    #[serde(default)]
-    pub status: Option<String>,
-    #[serde(default)]
-    pub creation_timestamp: Option<serde_json::Value>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RegistryResponse {
-    pub registered_models: Vec<RegisteredModel>,
-    #[serde(default)]
-    pub count: Option<u32>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ModelDetailResponse {
-    pub registered_model: RegisteredModel,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ModelVersionsResponse {
-    #[serde(default)]
-    pub model_name: Option<String>,
-    pub versions: Vec<ModelVersion>,
-    #[serde(default)]
-    pub count: Option<u32>,
-}
-
-// ── Deployments ─────────────────────────────────────────────────────
-
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Deployment {
-    pub id: String,
-    #[serde(default)]
-    pub status: Option<String>,
-    #[serde(default)]
-    pub strategy: Option<String>,
-    #[serde(default)]
-    pub model_version_id: Option<String>,
-    #[serde(default)]
-    pub current_stage: Option<u32>,
-    #[serde(default)]
-    pub total_stages: Option<u32>,
-    #[serde(default)]
-    pub eligible_robot_count: Option<u32>,
-    #[serde(default)]
-    pub deployed_count: Option<u32>,
-    #[serde(default)]
-    pub failed_count: Option<u32>,
-    #[serde(default)]
-    pub created_at: Option<String>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-pub struct DeploymentsResponse {
-    pub deployments: Vec<Deployment>,
-    #[serde(default)]
-    pub pagination: Option<Pagination>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DeploymentDetailResponse {
-    pub deployment: Deployment,
-    #[serde(default)]
-    pub model_version: Option<serde_json::Value>,
-    #[serde(default)]
-    pub metrics: Option<serde_json::Value>,
-}
-
-// ── Skills ──────────────────────────────────────────────────────────
-
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Skill {
-    pub id: String,
-    #[serde(default)]
-    pub name: Option<String>,
-    #[serde(default)]
-    pub version: Option<String>,
-    #[serde(default)]
-    pub description: Option<String>,
-    #[serde(default)]
-    pub status: Option<String>,
-    #[serde(default)]
-    pub robot_type_id: Option<String>,
-    #[serde(default)]
-    pub parameters: Option<serde_json::Value>,
-    #[serde(default)]
-    pub linked_model_version_id: Option<String>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-pub struct SkillsResponse {
-    pub skills: Vec<Skill>,
-    #[serde(default)]
-    pub pagination: Option<Pagination>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-pub struct SkillDetailResponse {
-    pub skill: Skill,
-}
-
-// ── Embodiments ─────────────────────────────────────────────────────
-
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Embodiment {
-    #[serde(default)]
-    pub tag: Option<String>,
-    #[serde(default)]
-    pub manufacturer: Option<String>,
-    #[serde(default)]
-    pub model: Option<String>,
-    #[serde(default)]
-    pub action_dim: Option<u32>,
-    #[serde(default)]
-    pub proprioception_dim: Option<u32>,
-    #[serde(default)]
-    pub robot_type_id: Option<String>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-pub struct EmbodimentsResponse {
-    pub embodiments: Vec<Embodiment>,
-    #[serde(default)]
-    pub pagination: Option<Pagination>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-pub struct EmbodimentDetailResponse {
-    pub embodiment: Embodiment,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-pub struct EmbodimentConfigResponse {
-    #[serde(default)]
-    pub tag: Option<String>,
-    #[serde(default)]
-    pub config: Option<serde_json::Value>,
-}
-
-// ── Evaluation ──────────────────────────────────────────────────────
-
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct EvalEpisode {
-    #[serde(default)]
-    pub id: Option<String>,
-    #[serde(default)]
-    pub robot_id: Option<String>,
-    #[serde(default)]
-    pub model_version: Option<String>,
-    #[serde(default)]
-    pub task_prompt: Option<String>,
-    #[serde(default)]
-    pub success: Option<bool>,
-    #[serde(default)]
-    pub duration_ms: Option<u64>,
-    #[serde(default)]
-    pub started_at: Option<String>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-pub struct EvalEpisodesResponse {
-    pub episodes: Vec<EvalEpisode>,
-    #[serde(default)]
-    pub pagination: Option<Pagination>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SuccessRate {
-    #[serde(default)]
-    pub model_version: Option<String>,
-    #[serde(default)]
-    pub success_rate: Option<f64>,
-    #[serde(default)]
-    pub total_episodes: Option<u32>,
-    #[serde(default)]
-    pub success_count: Option<u32>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct EvalComparison {
-    #[serde(default)]
-    pub version_a: Option<String>,
-    #[serde(default)]
-    pub version_b: Option<String>,
-    #[serde(default)]
-    pub success_rate_a: Option<f64>,
-    #[serde(default)]
-    pub success_rate_b: Option<f64>,
-    #[serde(default)]
-    pub improvement: Option<f64>,
+    #[test]
+    fn alert_counts_total_adds_every_bucket() {
+        let c: AlertCounts = serde_json::from_value(
+            serde_json::json!({"critical":1,"error":2,"warning":3,"info":4}),
+        )
+        .unwrap();
+        assert_eq!(c.total(), 10);
+        assert_eq!(AlertCounts::default().total(), 0);
+    }
 }

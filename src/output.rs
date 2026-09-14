@@ -1,4 +1,5 @@
 use colored::*;
+use std::sync::OnceLock;
 
 const BRAND: &str = "NeoDEM";
 
@@ -14,11 +15,7 @@ pub fn banner() {
 
 pub fn section(icon: &str, title: &str) {
     println!();
-    println!(
-        "  {} {}",
-        icon.truecolor(255, 103, 0),
-        title.bold()
-    );
+    println!("  {} {}", icon.truecolor(255, 103, 0), title.bold());
     println!("  {}", "┄".repeat(50).bright_black());
 }
 
@@ -56,50 +53,44 @@ pub fn table_header(columns: &[(&str, usize)]) {
 }
 
 pub fn success(msg: &str) {
-    println!(
-        "  {} {}",
-        "[OK]".truecolor(255, 103, 0).bold(),
-        msg
-    );
+    println!("  {} {}", "[OK]".truecolor(255, 103, 0).bold(), msg);
 }
 
 pub fn info(msg: &str) {
-    println!(
-        "  {} {}",
-        "[--]".bright_black(),
-        msg.bright_black()
-    );
-}
-
-pub fn count_label(label: &str, count: u32) {
-    println!();
-    println!(
-        "  {} {}",
-        format!("{count}").truecolor(255, 103, 0).bold(),
-        label.bright_black()
-    );
+    println!("  {} {}", "[--]".bright_black(), msg.bright_black());
 }
 
 pub fn status_indicator(status: &str) -> String {
     let (icon, colored) = match status.to_lowercase().as_str() {
-        "online" | "active" | "connected" | "completed" => {
+        // A latched stop is the one state that must never read as normal.
+        "emergency_stop" | "estop" | "e_stop" | "protective_stop" | "safety_stop" => {
+            ("■", status.to_uppercase().red().bold())
+        }
+        "online" | "active" | "connected" | "completed" | "done" | "succeeded" | "success"
+        | "healthy" | "published" | "compliant" | "resolved" | "closed" | "approved" => {
             ("●", status.green().bold())
         }
-        "offline" | "disconnected" | "failed" => {
-            ("●", status.red().bold())
-        }
-        "error" => {
-            ("●", status.red().bold())
-        }
-        "degraded" | "warning" | "pending" => {
-            ("●", status.yellow().bold())
-        }
-        "idle" | "unknown" => {
-            ("○", status.bright_black())
-        }
+        "offline" | "disconnected" | "failed" | "error" | "rejected" | "aborted" | "expired"
+        | "overdue" | "non_compliant" => ("●", status.red().bold()),
+        "degraded" | "warning" | "pending" | "queued" | "paused" | "stale" | "at_risk"
+        | "partial" | "awaiting_approval" | "in_progress" | "open" => ("●", status.yellow().bold()),
+        // Doing something on purpose: not a fault, not idle.
+        "busy" | "running" | "charging" | "moving" | "executing" | "training" | "canary"
+        | "staging" | "manual" | "teleop" => ("◐", status.truecolor(255, 103, 0).bold()),
+        "idle" | "unknown" | "ready" | "draft" | "created" | "archived" | "cancelled"
+        | "canceled" | "deprecated" | "skipped" => ("○", status.bright_black()),
         _ => ("○", status.normal()),
     };
     format!("{} {}", icon.bright_black(), colored)
+}
+
+/// True/false as a glyph, for columns like ACK or ENABLED.
+pub fn bool_indicator(v: Option<bool>) -> String {
+    match v {
+        Some(true) => "✓".green().to_string(),
+        Some(false) => "·".bright_black().to_string(),
+        None => "-".bright_black().to_string(),
+    }
 }
 
 pub fn severity_indicator(severity: &str) -> String {
@@ -113,11 +104,30 @@ pub fn severity_indicator(severity: &str) -> String {
     format!("{} {}", icon, colored)
 }
 
+/// Shorten to `max` *characters*, never bytes.
+///
+/// Slicing by byte index panics the moment a multi-byte character straddles the
+/// cut, which server-supplied names (robot names, dataset titles) reach easily.
 pub fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
+    if max == 0 {
+        return String::new();
+    }
+    if s.chars().count() <= max {
         s.to_string()
     } else {
-        format!("{}…", &s[..max - 1])
+        let kept: String = s.chars().take(max - 1).collect();
+        format!("{kept}…")
+    }
+}
+
+/// Truncate for diagnostics, where a hard character budget matters more than
+/// looking tidy.
+pub fn clip(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let kept: String = s.chars().take(max).collect();
+        format!("{kept}… [{} chars total]", s.chars().count())
     }
 }
 
@@ -189,4 +199,165 @@ pub fn stat_line(icon: &str, label: &str, value: &str, color: &str) {
         label.bright_black(),
         colored_value
     );
+}
+
+pub fn warn(msg: &str) {
+    println!("  {} {}", "[!]".yellow().bold(), msg);
+}
+
+/// Header for a block inside a detail view.
+pub fn subsection(label: &str) {
+    println!();
+    println!("    {} {}", "│".bright_black(), label.bold().bright_black());
+}
+
+/// Print a server payload verbatim for `--json`.
+pub fn json_out(value: &serde_json::Value) -> crate::error::RmsResult<()> {
+    println!("{}", serde_json::to_string_pretty(value)?);
+    Ok(())
+}
+
+/// The `--page` the user asked for, so list footers can say where they are.
+///
+/// Set once from the global flags. A footer cannot take this as a parameter
+/// without threading it through all sixty call sites, and it is genuinely
+/// process-wide input rather than per-command state.
+static REQUESTED_PAGE: OnceLock<u32> = OnceLock::new();
+
+pub fn set_requested_page(page: Option<u32>) {
+    if let Some(p) = page.filter(|p| *p > 0) {
+        let _ = REQUESTED_PAGE.set(p);
+    }
+}
+
+fn requested_page() -> u32 {
+    REQUESTED_PAGE.get().copied().unwrap_or(1)
+}
+
+/// Footer for a list, honest about pagination.
+///
+/// The old `count_label` printed the envelope's `total` under a table holding
+/// only one page, so `alerts list` claimed 75 rows while showing 50. When the
+/// two disagree, say so and name the flag that gets the rest.
+pub fn count_paged(label: &str, shown: usize, total: Option<u32>, total_pages: Option<u32>) {
+    println!();
+    let total = total.map(|t| t as usize);
+    match total {
+        Some(t) if t > shown => {
+            println!(
+                "  {} {}",
+                format!("{shown} of {t}").truecolor(255, 103, 0).bold(),
+                label.bright_black()
+            );
+            let page = requested_page();
+            let more = match total_pages.filter(|p| *p > 1) {
+                Some(p) => format!("page {page} of {p} — use --page N, or --limit {t} for all"),
+                None => format!("use --limit {t} to fetch all"),
+            };
+            println!("  {} {}", "[--]".bright_black(), more.bright_black());
+        }
+        _ => {
+            let n = total.unwrap_or(shown);
+            println!(
+                "  {} {}",
+                format!("{n}").truecolor(255, 103, 0).bold(),
+                label.bright_black()
+            );
+        }
+    }
+}
+
+/// Gate for anything that changes fleet or deployment state.
+///
+/// Returns true when the caller may proceed. Without `--yes` it describes the
+/// action and refuses, so a mistyped robot ID costs nothing.
+pub fn confirm(action: &str, yes: bool) -> bool {
+    if yes {
+        return true;
+    }
+    println!();
+    println!("  {} {}", "[!]".yellow().bold(), action.bold());
+    println!(
+        "  {} {}",
+        "[-->]".truecolor(255, 103, 0),
+        "Re-run with --yes to execute.".bright_black()
+    );
+    println!();
+    false
+}
+
+/// Width that fits a full 36-character UUID plus padding.
+pub const ID_W: usize = 38;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The pre-audit `truncate` sliced by byte index, so any name longer than
+    /// the limit whose cut landed inside a multi-byte character panicked with
+    /// "byte index N is not a char boundary" and killed the whole command.
+    #[test]
+    fn truncate_does_not_split_multibyte_characters() {
+        let cases = [
+            "Roboter-Übergabestation Süd-Ost",
+            "机器人装配单元一号线",
+            "Poste d'assemblage — atelier nº 4",
+            "🤖🤖🤖 pick-and-place cell 🤖🤖🤖",
+            "Väderstation för lagerhallen i Göteborg",
+        ];
+        for s in cases {
+            for max in 1..=40 {
+                let out = truncate(s, max);
+                assert!(
+                    out.chars().count() <= max,
+                    "{s:?} at max={max} produced {} chars",
+                    out.chars().count()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn truncate_leaves_short_strings_alone() {
+        assert_eq!(truncate("SimBot-01", 24), "SimBot-01");
+        assert_eq!(truncate("Übergabe", 8), "Übergabe");
+        assert_eq!(truncate("", 10), "");
+        assert_eq!(truncate("anything", 0), "");
+    }
+
+    #[test]
+    fn truncate_marks_what_it_cut() {
+        let out = truncate("G1-EDU-Bot (Agent Mode)", 12);
+        assert_eq!(out.chars().count(), 12);
+        assert!(out.ends_with('…'));
+    }
+
+    #[test]
+    fn clip_is_char_safe_too() {
+        for max in 1..=20 {
+            let out = clip("Überwachung der Roboterflotte", max);
+            assert!(
+                out.starts_with(
+                    &"Überwachung der Roboterflotte"
+                        .chars()
+                        .take(max)
+                        .collect::<String>()
+                )
+            );
+        }
+    }
+
+    /// `pad` measures visible width, so a coloured cell must still line up.
+    #[test]
+    fn pad_ignores_ansi_escapes() {
+        let plain = pad("online", 12);
+        let coloured = pad(&"online".green().to_string(), 12);
+        assert_eq!(visible_len(&plain), 12);
+        assert_eq!(visible_len(&coloured), 12);
+    }
+
+    #[test]
+    fn pad_does_not_truncate_when_over_width() {
+        assert_eq!(pad("sim-robot-g1-edu-b", 4), "sim-robot-g1-edu-b");
+    }
 }

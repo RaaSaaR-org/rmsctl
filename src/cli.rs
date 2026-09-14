@@ -1,19 +1,36 @@
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "rmsctl", about = "NeoDEM robot management CLI", version)]
+#[command(
+    name = "rmsctl",
+    about = "NeoDEM robot management CLI",
+    version,
+    max_term_width = 100
+)]
 pub struct Cli {
     /// Server URL (default: http://localhost:3001/api)
-    #[arg(long, env = "RMS_SERVER_URL")]
+    #[arg(long, env = "RMS_SERVER_URL", global = true)]
     pub server: Option<String>,
 
     /// JWT auth token
-    #[arg(long, env = "RMS_TOKEN")]
+    #[arg(long, env = "RMS_TOKEN", global = true)]
     pub token: Option<String>,
 
-    /// Output as JSON instead of formatted text
-    #[arg(long)]
+    /// Output the server payload as JSON instead of formatted text
+    #[arg(long, global = true)]
     pub json: bool,
+
+    /// Execute state-changing commands instead of describing them
+    #[arg(long, global = true)]
+    pub yes: bool,
+
+    /// Page of results to fetch (list commands)
+    #[arg(long, global = true, value_name = "N")]
+    pub page: Option<u32>,
+
+    /// Results per page (list commands)
+    #[arg(long, global = true, value_name = "N")]
+    pub limit: Option<u32>,
 
     #[command(subcommand)]
     pub command: Command,
@@ -33,32 +50,77 @@ pub enum Command {
     },
     /// Show fleet status overview
     Status,
+    /// Emergency stop and safety state
+    Safety {
+        #[command(subcommand)]
+        cmd: SafetyCommand,
+    },
+    /// Incident triage
+    Incidents {
+        #[command(subcommand)]
+        cmd: IncidentsCommand,
+    },
+    /// Human oversight: anomalies, manual mode, verifications
+    Oversight {
+        #[command(subcommand)]
+        cmd: OversightCommand,
+    },
+    /// Approval workflows
+    Approvals {
+        #[command(subcommand)]
+        cmd: ApprovalsCommand,
+    },
+    /// Teleoperation sessions
+    Teleop {
+        #[command(subcommand)]
+        cmd: TeleopCommand,
+    },
+    /// Patrol routes, runs and findings
+    Patrol {
+        #[command(subcommand)]
+        cmd: PatrolCommand,
+    },
+    /// Robot OTA updates
+    Updates {
+        #[command(subcommand)]
+        cmd: UpdatesCommand,
+    },
+    /// Process definitions, instances and tasks
+    Processes {
+        #[command(subcommand)]
+        cmd: ProcessesCommand,
+    },
+    /// Compliance tracker
+    Compliance {
+        #[command(subcommand)]
+        cmd: ComplianceCommand,
+    },
     /// Browse datasets
     Datasets {
         #[command(subcommand)]
         cmd: DatasetsCommand,
     },
-    /// Browse training jobs
+    /// Training jobs
     Training {
         #[command(subcommand)]
         cmd: TrainingCommand,
     },
-    /// Browse model registry
+    /// Model version registry
     Models {
         #[command(subcommand)]
         cmd: ModelsCommand,
     },
-    /// Browse deployments
+    /// Model deployments
     Deployments {
         #[command(subcommand)]
         cmd: DeploymentsCommand,
     },
-    /// Browse VLA skill library
+    /// VLA skill library
     Skills {
         #[command(subcommand)]
         cmd: SkillsCommand,
     },
-    /// Browse robot embodiment configs
+    /// Robot embodiment configs
     Embodiments {
         #[command(subcommand)]
         cmd: EmbodimentsCommand,
@@ -70,33 +132,36 @@ pub enum Command {
     },
 }
 
+// ── Robots ──────────────────────────────────────────────────────────────
+
 #[derive(Subcommand)]
 pub enum RobotsCommand {
     /// List all robots
     List,
     /// Show robot details
-    Show {
-        /// Robot ID
-        id: String,
-    },
+    Show { id: String },
     /// Register a robot by URL
     Register {
         /// Robot agent URL (e.g. http://192.168.178.45:41243)
         url: String,
     },
     /// Unregister a robot
-    Remove {
-        /// Robot ID
-        id: String,
-    },
+    Remove { id: String },
     /// Show robot telemetry
     Telemetry {
-        /// Robot ID
         id: String,
+        /// Show recent telemetry history instead of the latest frame
+        #[arg(long)]
+        history: bool,
     },
+    /// Show agent-mode and E-stop state for a robot
+    AgentMode { id: String },
+    /// List a robot's cameras
+    Cameras { id: String },
+    /// List a robot's A2A peers
+    Peers { id: String },
     /// Send a command to a robot
     Command {
-        /// Robot ID
         id: String,
         /// Command type
         #[arg(name = "type")]
@@ -104,8 +169,13 @@ pub enum RobotsCommand {
         /// JSON payload
         #[arg(long)]
         payload: Option<String>,
+        /// Command priority
+        #[arg(long)]
+        priority: Option<String>,
     },
 }
+
+// ── Alerts ──────────────────────────────────────────────────────────────
 
 #[derive(Subcommand)]
 pub enum AlertsCommand {
@@ -118,12 +188,348 @@ pub enum AlertsCommand {
         #[arg(long)]
         active: bool,
     },
+    /// Show one alert
+    Show { id: String },
     /// Acknowledge an alert
-    Ack {
-        /// Alert ID
-        id: String,
+    Ack { id: String },
+    /// Show alert history
+    History,
+    /// Delete one alert
+    Delete { id: String },
+    /// Bulk-delete alerts
+    Clear {
+        /// Delete only acknowledged alerts
+        #[arg(long)]
+        acknowledged: bool,
+        /// Delete every alert
+        #[arg(long)]
+        all: bool,
     },
 }
+
+// ── Safety ──────────────────────────────────────────────────────────────
+
+#[derive(Subcommand)]
+pub enum SafetyCommand {
+    /// Show E-stop and safety state (fleet-wide, or one robot)
+    Status {
+        /// Limit to a single robot
+        #[arg(long)]
+        robot: Option<String>,
+    },
+    /// Engage emergency stop
+    Estop {
+        /// Robot ID (omit with --fleet)
+        id: Option<String>,
+        /// Stop every robot in the fleet
+        #[arg(long)]
+        fleet: bool,
+        /// Why the stop was triggered
+        #[arg(long)]
+        reason: Option<String>,
+    },
+    /// Reset a latched emergency stop
+    Reset {
+        /// Robot ID (omit with --fleet)
+        id: Option<String>,
+        /// Reset the whole fleet
+        #[arg(long)]
+        fleet: bool,
+    },
+    /// Engage emergency stop for every robot in a zone
+    ZoneEstop {
+        zone_id: String,
+        #[arg(long)]
+        reason: Option<String>,
+    },
+    /// List recent safety events
+    Events,
+}
+
+// ── Incidents ───────────────────────────────────────────────────────────
+
+#[derive(Subcommand)]
+pub enum IncidentsCommand {
+    /// List incidents
+    List {
+        #[arg(long)]
+        status: Option<String>,
+        #[arg(long)]
+        severity: Option<String>,
+        #[arg(long)]
+        robot_id: Option<String>,
+    },
+    /// Show one incident
+    Show { id: String },
+    /// Incident dashboard rollup
+    Dashboard,
+    /// List open incidents
+    Open,
+    /// List overdue incidents
+    Overdue,
+    /// Severity/likelihood risk matrix
+    RiskMatrix,
+    /// List evidence attached to an incident
+    Evidence { id: String },
+}
+
+// ── Oversight ───────────────────────────────────────────────────────────
+
+#[derive(Subcommand)]
+pub enum OversightCommand {
+    /// Oversight dashboard
+    Dashboard,
+    /// Fleet behaviour overview
+    Fleet,
+    /// List anomalies
+    Anomalies {
+        /// Only currently active anomalies
+        #[arg(long)]
+        active: bool,
+        /// Only unacknowledged anomalies
+        #[arg(long)]
+        unacked: bool,
+    },
+    /// Acknowledge an anomaly
+    AckAnomaly { id: String },
+    /// Resolve an anomaly
+    ResolveAnomaly {
+        id: String,
+        #[arg(long)]
+        notes: Option<String>,
+    },
+    /// List manual-control sessions
+    ManualSessions,
+    /// Take or release manual control of a robot
+    ManualMode {
+        robot_id: String,
+        #[arg(long)]
+        reason: Option<String>,
+        /// Release manual control instead of taking it
+        #[arg(long)]
+        off: bool,
+    },
+    /// List oversight verifications
+    Verifications {
+        /// Only verifications that are due
+        #[arg(long)]
+        due: bool,
+    },
+    /// Show a robot's oversight capabilities
+    Capabilities { robot_id: String },
+    /// Oversight audit log
+    Logs,
+}
+
+// ── Approvals ───────────────────────────────────────────────────────────
+
+#[derive(Subcommand)]
+pub enum ApprovalsCommand {
+    /// List approval requests
+    List,
+    /// Show one approval request
+    Show { id: String },
+    /// Approvals waiting on you
+    Pending {
+        /// Show approvals pending for a role instead
+        #[arg(long)]
+        role: Option<String>,
+    },
+    /// Overdue approvals
+    Overdue,
+    /// Approvals nearing their deadline
+    Nearing,
+    /// Decide an approval step
+    Decide {
+        id: String,
+        step_id: String,
+        /// approve | reject | defer | request_info
+        #[arg(long)]
+        decision: String,
+        #[arg(long)]
+        notes: Option<String>,
+    },
+    /// Cancel an approval request
+    Cancel { id: String },
+    /// Escalate an approval request
+    Escalate { id: String },
+    /// Approval metrics
+    Metrics,
+    /// SLA report
+    SlaReport,
+}
+
+// ── Teleoperation ───────────────────────────────────────────────────────
+
+#[derive(Subcommand)]
+pub enum TeleopCommand {
+    /// List teleoperation sessions
+    List {
+        #[arg(long)]
+        robot_id: Option<String>,
+        #[arg(long)]
+        status: Option<String>,
+        #[arg(long = "type", name = "type")]
+        session_type: Option<String>,
+    },
+    /// Show one session
+    Show { id: String },
+    /// List a session's episodes
+    Episodes { id: String },
+    /// Pause a session
+    Pause { id: String },
+    /// Resume a session
+    Resume { id: String },
+    /// End a session
+    End { id: String },
+}
+
+// ── Patrol ──────────────────────────────────────────────────────────────
+
+#[derive(Subcommand)]
+pub enum PatrolCommand {
+    /// List patrol routes
+    Routes,
+    /// Show one patrol route
+    Route { id: String },
+    /// List patrol runs
+    Runs {
+        #[arg(long)]
+        route: Option<String>,
+    },
+    /// Show one patrol run
+    Run { run_id: String },
+    /// List patrol findings
+    Findings,
+    /// Show one finding
+    Finding { id: String },
+    /// List known places
+    Places,
+    /// Start a patrol
+    Start {
+        route_id: String,
+        #[arg(long)]
+        robot_id: Option<String>,
+        /// baseline | patrol
+        #[arg(long)]
+        mode: Option<String>,
+    },
+    /// Abort a running patrol
+    Abort {
+        route_id: String,
+        #[arg(long)]
+        robot_id: Option<String>,
+        #[arg(long)]
+        reason: Option<String>,
+    },
+    /// Acknowledge a finding
+    AckFinding { id: String },
+    /// Mark a finding as normal (fold into the baseline)
+    NormalFinding { id: String },
+    /// Escalate a finding to an incident
+    EscalateFinding { id: String },
+    /// Promote a run to the baseline
+    PromoteRun { run_id: String },
+}
+
+// ── Updates ─────────────────────────────────────────────────────────────
+
+#[derive(Subcommand)]
+pub enum UpdatesCommand {
+    /// List available updates
+    List,
+    /// Show one update
+    Show { id: String },
+    /// Show update deployments for a robot
+    Deployments { robot_id: String },
+    /// Approve an update
+    Approve {
+        id: String,
+        #[arg(long)]
+        approver_id: String,
+    },
+    /// Deploy an update to a robot
+    Deploy {
+        id: String,
+        robot_id: String,
+        #[arg(long)]
+        previous_version: Option<String>,
+    },
+    /// Roll a robot back to an earlier version
+    Rollback {
+        id: String,
+        robot_id: String,
+        #[arg(long)]
+        target_version: String,
+    },
+}
+
+// ── Processes ───────────────────────────────────────────────────────────
+
+#[derive(Subcommand)]
+pub enum ProcessesCommand {
+    /// List process definitions
+    List,
+    /// Show one process definition
+    Show { id: String },
+    /// List process instances
+    Instances {
+        #[arg(long)]
+        status: Option<String>,
+    },
+    /// Show one process instance
+    Instance { id: String },
+    /// List tasks
+    Tasks,
+    /// Task queue statistics
+    TaskQueue,
+    /// Start a process definition
+    Start { id: String },
+    /// Pause a running instance
+    Pause { instance_id: String },
+    /// Resume a paused instance
+    Resume { instance_id: String },
+    /// Cancel an instance
+    Cancel { instance_id: String },
+    /// Retry a failed instance
+    Retry { instance_id: String },
+}
+
+// ── Compliance ──────────────────────────────────────────────────────────
+
+#[derive(Subcommand)]
+pub enum ComplianceCommand {
+    /// Compliance score dashboard
+    Dashboard,
+    /// Upcoming and past-due deadlines
+    Deadlines,
+    /// Open compliance gaps
+    Gaps {
+        /// Show the rollup instead of individual gaps
+        #[arg(long)]
+        summary: bool,
+    },
+    /// Compliance-log metrics
+    Metrics,
+    /// Documents that are expiring
+    Documents,
+    /// Compliance training records
+    Training {
+        #[arg(long)]
+        summary: bool,
+    },
+    /// Inspections
+    Inspections {
+        #[arg(long)]
+        summary: bool,
+    },
+    /// Risk assessments
+    RiskAssessments,
+    /// Recent compliance activity
+    Activity,
+}
+
+// ── Datasets ────────────────────────────────────────────────────────────
 
 #[derive(Subcommand)]
 pub enum DatasetsCommand {
@@ -133,7 +539,41 @@ pub enum DatasetsCommand {
     Show { id: String },
     /// List episodes in a dataset
     Episodes { id: String },
+    /// Quality report
+    Quality { id: String },
+    /// Dataset statistics
+    Stats { id: String },
+    /// Validate a dataset
+    Validate {
+        id: String,
+        /// Run the slower, deeper validation
+        #[arg(long)]
+        advanced: bool,
+    },
+    /// Push a dataset to the Hugging Face Hub
+    Push {
+        id: String,
+        /// Hugging Face token
+        #[arg(long)]
+        hf_token: String,
+        /// Target repo (e.g. org/dataset-name)
+        #[arg(long)]
+        repo_id: String,
+    },
+    /// Status of a running Hub push
+    PushStatus { id: String },
+    /// List flagged episodes
+    Flagged { id: String },
+    /// Flag one episode
+    Flag {
+        id: String,
+        index: u32,
+        #[arg(long)]
+        reason: Option<String>,
+    },
 }
+
+// ── Training ────────────────────────────────────────────────────────────
 
 #[derive(Subcommand)]
 pub enum TrainingCommand {
@@ -145,41 +585,110 @@ pub enum TrainingCommand {
     Active,
     /// Show queue statistics
     Queue,
+    /// List training workers
+    Workers,
+    /// Start a training job from a JSON config file
+    Start {
+        /// Path to a JSON file holding the job config
+        #[arg(long)]
+        config: String,
+    },
+    /// Cancel a training job
+    Cancel { id: String },
+    /// Retry a failed training job
+    Retry { id: String },
+    /// Show a job's export manifest
+    Export { id: String },
+    /// Show a job's runtime estimate
+    Estimate { id: String },
 }
+
+// ── Models ──────────────────────────────────────────────────────────────
 
 #[derive(Subcommand)]
 pub enum ModelsCommand {
-    /// List registered models
+    /// List model versions
     List,
-    /// Show model details and versions
-    Show { name: String },
-    /// Compare two training runs
+    /// Show a model version and its evaluation rollup
+    Show { id: String },
+    /// Show a model version's lineage
+    Lineage { id: String },
+    /// Compare the metrics of two model versions
     Compare {
-        /// First run ID
-        run_a: String,
-        /// Second run ID
-        run_b: String,
-        /// Metric keys (comma-separated)
-        #[arg(long, default_value = "loss")]
-        metrics: String,
+        version_a: String,
+        version_b: String,
+        /// Metric keys to diff (comma-separated); omit for all
+        #[arg(long)]
+        metrics: Option<String>,
     },
 }
+
+// ── Deployments ─────────────────────────────────────────────────────────
 
 #[derive(Subcommand)]
 pub enum DeploymentsCommand {
     /// List deployments
-    List,
+    List {
+        /// Only in-flight deployments
+        #[arg(long)]
+        active: bool,
+    },
     /// Show deployment details
     Show { id: String },
+    /// Show deployment metrics
+    Metrics { id: String },
+    /// Promote a deployment to the next stage
+    Promote { id: String },
+    /// Roll a deployment back
+    Rollback {
+        id: String,
+        #[arg(long)]
+        reason: Option<String>,
+    },
+    /// Cancel a deployment
+    Cancel { id: String },
 }
+
+// ── Skills ──────────────────────────────────────────────────────────────
 
 #[derive(Subcommand)]
 pub enum SkillsCommand {
     /// List skills
-    List,
+    List {
+        /// Only published skills
+        #[arg(long)]
+        published: bool,
+    },
     /// Show skill details
     Show { id: String },
+    /// List skills available for a robot
+    ForRobot { robot_id: String },
+    /// List robots compatible with a skill
+    Compatible { id: String },
+    /// Check one skill against one robot
+    Check { id: String, robot_id: String },
+    /// Validate a skill definition
+    Validate { id: String },
+    /// Publish a skill
+    Publish { id: String },
+    /// Deprecate a skill
+    Deprecate { id: String },
+    /// Archive a skill
+    Archive { id: String },
+    /// Execute a skill on a robot
+    Execute {
+        id: String,
+        #[arg(long)]
+        robot_id: String,
+        /// Task prompt passed to the policy
+        #[arg(long)]
+        prompt: Option<String>,
+    },
+    /// Abort a running skill execution
+    Abort { id: String },
 }
+
+// ── Embodiments ─────────────────────────────────────────────────────────
 
 #[derive(Subcommand)]
 pub enum EmbodimentsCommand {
@@ -188,6 +697,8 @@ pub enum EmbodimentsCommand {
     /// Show embodiment details
     Show { tag: String },
 }
+
+// ── Eval ────────────────────────────────────────────────────────────────
 
 #[derive(Subcommand)]
 pub enum EvalCommand {
@@ -204,10 +715,38 @@ pub enum EvalCommand {
         robot_id: Option<String>,
         #[arg(long)]
         model_version: Option<String>,
+        /// Time window (24h, 7d, 30d, all)
+        #[arg(long)]
+        period: Option<String>,
     },
+    /// Show one evaluation episode
+    Episode { id: String },
+    /// Error breakdown
+    Errors {
+        #[arg(long)]
+        robot_id: Option<String>,
+        #[arg(long)]
+        model_version: Option<String>,
+    },
+    /// Reward-model scores
+    Rewards,
     /// Compare two model versions
     Compare {
         version_a: String,
         version_b: String,
+        /// Time window (24h, 7d, 30d, all)
+        #[arg(long)]
+        period: Option<String>,
+    },
+    /// Trigger a hardware evaluation run
+    RunHardware {
+        #[arg(long)]
+        robot_id: String,
+        #[arg(long)]
+        skill_id: String,
+        #[arg(long)]
+        episodes: Option<u32>,
+        #[arg(long)]
+        prompt: Option<String>,
     },
 }

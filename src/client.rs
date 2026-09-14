@@ -1,8 +1,9 @@
 use crate::config::RmsConfig;
 use crate::error::{RmsError, RmsResult};
-use reqwest::Client;
-use serde::de::DeserializeOwned;
+use reqwest::{Client, Method};
 use serde::Serialize;
+use serde::de::DeserializeOwned;
+use serde_json::Value;
 
 pub struct ApiClient {
     http: Client,
@@ -10,9 +11,14 @@ pub struct ApiClient {
     token: Option<String>,
 }
 
+/// The server is not consistent about which key carries the failure text:
+/// most routes send `{"error": "..."}`, a few add a longer `{"message": "..."}`.
 #[derive(serde::Deserialize)]
 struct ErrorBody {
-    error: String,
+    #[serde(default)]
+    error: Option<String>,
+    #[serde(default)]
+    message: Option<String>,
 }
 
 impl ApiClient {
@@ -28,69 +34,113 @@ impl ApiClient {
         format!("{}{}", self.base_url, path)
     }
 
-    fn apply_auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+    fn build(&self, method: Method, path: &str) -> reqwest::RequestBuilder {
+        let req = self.http.request(method, self.url(path));
         match &self.token {
             Some(t) => req.bearer_auth(t),
             None => req,
         }
     }
 
+    // ── Typed requests ──────────────────────────────────────────────────
+
     pub async fn get<T: DeserializeOwned>(&self, path: &str) -> RmsResult<T> {
-        let req = self.http.get(self.url(path));
-        self.send(self.apply_auth(req)).await
+        self.send(self.build(Method::GET, path)).await
     }
 
-    pub async fn get_with_query<T: DeserializeOwned>(
+    pub async fn get_query<T: DeserializeOwned, Q: Serialize + ?Sized>(
         &self,
         path: &str,
-        query: &[(&str, &str)],
+        query: &Q,
     ) -> RmsResult<T> {
-        let req = self.http.get(self.url(path)).query(query);
-        self.send(self.apply_auth(req)).await
+        self.send(self.build(Method::GET, path).query(query)).await
     }
 
-    pub async fn post<B: Serialize, T: DeserializeOwned>(
-        &self,
-        path: &str,
-        body: &B,
-    ) -> RmsResult<T> {
-        let req = self.http.post(self.url(path)).json(body);
-        self.send(self.apply_auth(req)).await
-    }
-
-    pub async fn patch<B: Serialize, T: DeserializeOwned>(
+    pub async fn post<B: Serialize + ?Sized, T: DeserializeOwned>(
         &self,
         path: &str,
         body: &B,
     ) -> RmsResult<T> {
-        let req = self.http.patch(self.url(path)).json(body);
-        self.send(self.apply_auth(req)).await
+        self.send(self.build(Method::POST, path).json(body)).await
     }
 
-    pub async fn delete<T: DeserializeOwned>(&self, path: &str) -> RmsResult<T> {
-        let req = self.http.delete(self.url(path));
-        self.send(self.apply_auth(req)).await
+    // ── Raw passthrough ─────────────────────────────────────────────────
+    //
+    // `--json` must hand the caller exactly what the server said. Routing it
+    // through a typed struct silently drops every field the struct omits, so
+    // these return the untouched body instead.
+
+    pub async fn get_value(&self, path: &str) -> RmsResult<Value> {
+        self.send(self.build(Method::GET, path)).await
+    }
+
+    pub async fn get_value_query<Q: Serialize + ?Sized>(
+        &self,
+        path: &str,
+        query: &Q,
+    ) -> RmsResult<Value> {
+        self.send(self.build(Method::GET, path).query(query)).await
+    }
+
+    pub async fn post_value<B: Serialize + ?Sized>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> RmsResult<Value> {
+        self.send(self.build(Method::POST, path).json(body)).await
+    }
+
+    pub async fn patch_value<B: Serialize + ?Sized>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> RmsResult<Value> {
+        self.send(self.build(Method::PATCH, path).json(body)).await
+    }
+
+    pub async fn put_value<B: Serialize + ?Sized>(&self, path: &str, body: &B) -> RmsResult<Value> {
+        self.send(self.build(Method::PUT, path).json(body)).await
+    }
+
+    pub async fn delete_value(&self, path: &str) -> RmsResult<Value> {
+        self.send(self.build(Method::DELETE, path)).await
     }
 
     async fn send<T: DeserializeOwned>(&self, req: reqwest::RequestBuilder) -> RmsResult<T> {
         let resp = req.send().await?;
         let status = resp.status();
+        let body = resp.text().await?;
 
-        if status.is_success() {
-            let body = resp.text().await?;
-            serde_json::from_str(&body).map_err(|e| {
-                RmsError::Other(format!("Failed to parse response: {e}\nBody: {body}"))
-            })
-        } else {
-            let code = status.as_u16();
-            let body = resp.text().await.unwrap_or_default();
+        if !status.is_success() {
             let message = serde_json::from_str::<ErrorBody>(&body)
-                .map(|e| e.error)
-                .unwrap_or(body);
-            Err(RmsError::Api {
-                status: code,
+                .ok()
+                .and_then(|e| e.error.or(e.message))
+                .unwrap_or_else(|| {
+                    if body.trim().is_empty() {
+                        status.canonical_reason().unwrap_or("request failed").into()
+                    } else {
+                        body.clone()
+                    }
+                });
+            return Err(RmsError::Api {
+                status: status.as_u16(),
                 message,
-            })
+            });
         }
+
+        // 204 and bare-`OK` handlers send no body; `null` deserializes into
+        // Value and Option<T> so those callers do not have to special-case it.
+        let text = if body.trim().is_empty() {
+            "null"
+        } else {
+            &body
+        };
+
+        serde_json::from_str(text).map_err(|e| {
+            RmsError::Parse(format!(
+                "{e}\n  The server sent a shape this command does not understand.\n  Body: {}",
+                crate::output::clip(&body, 600)
+            ))
+        })
     }
 }
