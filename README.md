@@ -157,6 +157,7 @@ rmsctl datasets push-status <id>
 rmsctl datasets upload <dir> [--name X]          # LeRobot-Verzeichnis direkt hochladen (ohne Hugging Face)
 rmsctl datasets upload-status <id>               # Was der Server von einem Upload haelt
 rmsctl datasets upload-cancel <id>               # Upload abbrechen, Gespeichertes loeschen
+rmsctl datasets download <id> [--out <dir>]      # Datensatz als LeRobot-Verzeichnis zurueckholen
 rmsctl datasets flagged <id>                     # Markierte Episoden
 rmsctl datasets flag <id> <index> [--reason X]
 
@@ -234,6 +235,73 @@ Datensatz im Modus `metadata`.
   (gemessen: ca. 30 MB fuer 446 MB mit zwei 210-MB-Videos).
 - **Pruefsummen:** Jeder Teil traegt seinen SHA-256 (`X-Chunk-Sha256`); zusaetzlich wird
   pro Datei ein SHA-256 angemeldet, den der Server nach dem Zusammensetzen gegenliest.
+
+#### Datensatz herunterladen
+
+`rmsctl datasets download` holt einen Datensatz aus einer RMS-Instanz zurueck — als das
+LeRobot-Verzeichnis, als das er gespeichert ist: `meta/`, `data/`, `videos/` … mit
+denselben relativen Pfaden und denselben Bytes, direkt aus dem Speicher der Instanz, ohne
+Hugging Face. Das ist der Rueckweg fuer Datensaetze, die mit `datasets upload` ausgelagert
+wurden, um lokal Platz zu schaffen; es funktioniert genauso fuer Hub-Importe.
+
+```bash
+rmsctl --server https://neodem.example/api datasets download 6d5a0077-6b1f-4920-84a8-1c691903f8e0
+rmsctl --server https://neodem.example/api datasets download 6d5a0077-… --out /data/g1-dex3-bottle-sorting-sim
+```
+
+```
+  ◈ Download: g1-dex3-bottle-sorting-sim
+    │ Dataset        6d5a0077-6b1f-4920-84a8-1c691903f8e0
+    │ Status         ready
+    │ Into           /data/g1-dex3-bottle-sorting-sim
+    │ Files          8 · 446.1 MB · from the rustfs store
+    │ Verified by    size and SHA-256
+    │ Downloading    ████████░░░░░░░░░░░░  41.2%  183.8 MB / 446.1 MB · 6/8 files · 48.1 MB/s · ETA 5s
+  [OK] Downloaded 8 file(s), 446.1 MB into /data/g1-dex3-bottle-sorting-sim
+    │ Fetched        446.1 MB in 9s
+    │ Verified       size of every file · SHA-256 of 8
+```
+
+Ohne `--out` entsteht `./<Datensatzname>`. Der Befehl aendert nichts auf dem Server und
+braucht deshalb kein `--yes`.
+
+| Flag | Bedeutung |
+| --- | --- |
+| `--out <dir>`, `-o` | Zielverzeichnis (Default: `./<Datensatzname>`) |
+| `--parallel <n>` | Gleichzeitig geholte Dateien (Default 4, max. 16) |
+| `--retries <n>` | Versuche pro Datei nach voruebergehenden Fehlern, mit Backoff (Default 8) |
+| `--resume` | In einem nicht leeren Verzeichnis weitermachen: vollstaendige Dateien behalten, angefangene fortsetzen |
+| `--force` | In ein nicht leeres Verzeichnis schreiben und jede Datei neu holen |
+| `--no-checksum` | Nur Groessen pruefen, auch wenn der Server SHA-256-Werte liefert |
+| `--stall-timeout <s>` | Sekunden ohne ein Byte, nach denen eine Anfrage neu gestellt wird (Default 60) |
+
+- **Nicht leeres Verzeichnis:** wird ohne `--resume` oder `--force` abgelehnt (Exit 1),
+  bevor irgendetwas geholt wird.
+- **Fortsetzen:** Eine Datei heisst `<name>.rmsctl-part`, solange sie unvollstaendig ist,
+  und bekommt ihren richtigen Namen erst, wenn Groesse (und SHA-256) stimmen. Nach einem
+  Abbruch (Ctrl-C, Netz weg, `kill -9`) denselben Befehl mit `--resume` ausfuehren:
+  Dateien mit passender Groesse werden uebersprungen, `.rmsctl-part`-Dateien per
+  `Range`-Anfrage ab ihrer Laenge fortgesetzt. Reisst eine Verbindung mitten in einer
+  Datei ab, macht `rmsctl` im selben Lauf genauso weiter. Der einzige Zustand ist das
+  Verzeichnis selbst.
+- **Pruefung:** Jede Datei wird gegen die Groesse aus der Dateiliste des Servers geprueft.
+  Einen SHA-256 liefert der Server fuer Datensaetze, die mit `rmsctl datasets upload`
+  (ohne `--no-checksum`) hochgeladen wurden; dann wird die ganze Datei nach dem Holen
+  gegengelesen und bei Abweichung neu geholt. Hub-Importe haben keinen — dort gilt die
+  Groesse.
+- **Fehler:** Kann eine Datei nicht reproduziert werden (Datei auf dem Server
+  verschwunden oder geaendert, Pruefsumme dauerhaft falsch, Versuche aufgebraucht), endet
+  der Befehl mit Exit 1, nennt die Datei und laesst das bisher Geholte fuer `--resume`
+  liegen. Pfade aus der Dateiliste, die das Zielverzeichnis verlassen wuerden, werden
+  abgelehnt, bevor etwas geschrieben wird.
+- **Rate-Limit:** Liste und Dateien zaehlen auf dem Server zum Budget des
+  Datensatz-Browsers (3000 Anfragen pro Minute). `429` und `503` werden mit `Retry-After`
+  abgewartet.
+- **`--json`:** keine Fortschrittsanzeige; am Ende ein Objekt mit `datasetId`, `out`,
+  `files`, `bytes`, `skippedFiles`, `fetchedBytes`, `verifiedSha256`.
+- **Server:** braucht die Datei-API aus RaaSaaR-org/robot-management-system (TASK-496,
+  `docs/dataset-download.md`). Ein aelterer Server wird mit "this server has no dataset
+  download API" gemeldet.
 - **Hinter einem Proxy:** Jede Anfrage traegt hoechstens einen Teil und wartet nie auf
   lange Serverarbeit. Auf einer langsamen Leitung `--chunk-size 8M` waehlen: ein Teil muss
   innerhalb des Proxy-Timeouts (ca. 100 s) ankommen.
