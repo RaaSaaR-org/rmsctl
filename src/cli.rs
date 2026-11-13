@@ -564,13 +564,28 @@ pub enum DatasetsCommand {
     PushStatus { id: String },
     /// Upload a LeRobot dataset directory straight into RMS (no Hugging Face)
     ///
-    /// Sends the directory file by file in bounded parts, verifies every part
-    /// by checksum, waits for the server's validation and prints the dataset.
-    /// Run the same command again to resume an interrupted upload: only the
-    /// parts the server does not hold yet are sent.
+    /// Sends EVERY file of the directory — the LeRobot tree, README.md and
+    /// whatever else is in it — file by file in bounded parts, verifies every
+    /// part by checksum, waits for the server's validation and prints the
+    /// dataset. Only .git, .DS_Store, __pycache__, a top-level .cache and
+    /// *.rmsctl-part are left out, plus what --exclude names; run without
+    /// --yes to see the list. Run the same command again to resume an
+    /// interrupted upload: only the parts the server does not hold yet are
+    /// sent. Before deleting the directory, run `datasets verify`.
     Upload {
         /// Dataset root: the directory that holds meta/ and data/
         dir: std::path::PathBuf,
+        /// Leave files out: *.log, notes, raw/*.bag (repeatable)
+        #[arg(long, value_name = "GLOB")]
+        exclude: Vec<String>,
+        /// Upload only the LeRobot tree (meta/, data/**/*.parquet,
+        /// videos/**/*.mp4, images/) — all that a server older than
+        /// "stores every file" keeps
+        #[arg(long)]
+        lerobot_only: bool,
+        /// Also upload .git, .DS_Store, __pycache__ and a top-level .cache
+        #[arg(long)]
+        no_default_excludes: bool,
         /// Dataset name (default: the directory name)
         #[arg(long)]
         name: Option<String>,
@@ -612,8 +627,9 @@ pub enum DatasetsCommand {
     },
     /// Download a dataset from RMS as the LeRobot directory it is stored as
     ///
-    /// Reproduces meta/, data/, videos/ … with the same relative paths and
-    /// the same bytes, straight from the instance's storage (no Hugging Face).
+    /// Reproduces every stored file — meta/, data/, videos/, README.md … —
+    /// with the same relative paths and the same bytes, straight from the
+    /// instance's storage (no Hugging Face).
     /// Every file is checked against the size the server lists, and against
     /// its SHA-256 where the server has one (datasets that were uploaded with
     /// rmsctl). Unfinished files end in .rmsctl-part; --resume continues them.
@@ -642,6 +658,39 @@ pub enum DatasetsCommand {
         /// Seconds a request may deliver nothing before it is tried again
         #[arg(long, value_name = "SECS", default_value_t = 60)]
         stall_timeout: u64,
+    },
+    /// Check that every file of a local directory is on the instance
+    ///
+    /// The step before deleting a local dataset. Compares the directory with
+    /// what the instance stores for the dataset: the same relative paths, the
+    /// same sizes, and the same SHA-256 wherever the instance has one (a
+    /// dataset uploaded with rmsctl). Only the file list is fetched — no file
+    /// is downloaded; the local files are hashed. Reads the directory by the
+    /// rules `datasets upload` does, so pass the same --exclude. Lists every
+    /// difference and exits non-zero when there is one.
+    Verify {
+        /// Dataset ID
+        id: String,
+        /// The local dataset directory to compare
+        dir: std::path::PathBuf,
+        /// Leave files out of the comparison, as on upload (repeatable)
+        #[arg(long, value_name = "GLOB")]
+        exclude: Vec<String>,
+        /// Compare only the LeRobot tree, as `upload --lerobot-only` sent it
+        #[arg(long)]
+        lerobot_only: bool,
+        /// Also compare .git, .DS_Store, __pycache__ and a top-level .cache
+        #[arg(long)]
+        no_default_excludes: bool,
+        /// Compare sizes only, even where the instance lists a SHA-256
+        #[arg(long, conflicts_with = "require_checksum")]
+        no_checksum: bool,
+        /// Fail for any file the instance lists no SHA-256 for
+        #[arg(long)]
+        require_checksum: bool,
+        /// Files hashed at once
+        #[arg(long, value_name = "N", default_value_t = 4, value_parser = clap::value_parser!(u8).range(1..=16))]
+        parallel: u8,
     },
     /// What the server holds of a direct upload
     UploadStatus { id: String },

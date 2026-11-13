@@ -84,10 +84,10 @@ fn a_cursor_survives_the_query_string() {
 
 // ── Scratch directories ─────────────────────────────────────────────────
 
-struct Scratch(PathBuf);
+pub(in crate::commands) struct Scratch(pub(in crate::commands) PathBuf);
 
 impl Scratch {
-    fn new(tag: &str) -> Self {
+    pub(in crate::commands) fn new(tag: &str) -> Self {
         static NEXT: AtomicUsize = AtomicUsize::new(0);
         let dir = std::env::temp_dir().join(format!(
             "rmsctl-dl-test-{}-{}-{tag}",
@@ -99,13 +99,13 @@ impl Scratch {
         Scratch(dir)
     }
 
-    fn write(&self, rel: &str, bytes: &[u8]) {
+    pub(in crate::commands) fn write(&self, rel: &str, bytes: &[u8]) {
         let path = self.0.join(rel);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, bytes).unwrap();
     }
 
-    fn path(&self, rel: &str) -> PathBuf {
+    pub(in crate::commands) fn path(&self, rel: &str) -> PathBuf {
         self.0.join(rel)
     }
 }
@@ -116,7 +116,7 @@ impl Drop for Scratch {
     }
 }
 
-fn pattern(len: usize, seed: u8) -> Vec<u8> {
+pub(in crate::commands) fn pattern(len: usize, seed: u8) -> Vec<u8> {
     (0..len)
         .map(|i| (i as u32 * 31 + seed as u32 * 7 + (i as u32 >> 8)) as u8)
         .collect()
@@ -131,12 +131,12 @@ fn sha(bytes: &[u8]) -> String {
 
 // ── A server that speaks the download contract ──────────────────────────
 
-const ID: &str = "ds-1";
+pub(in crate::commands) const ID: &str = "ds-1";
 const VIDEO: &str = "videos/observation.images.head/chunk-000/file-000.mp4";
 const DATA: &str = "data/chunk-000/file-000.parquet";
 
 #[derive(Clone)]
-enum Fault {
+pub(in crate::commands) enum Fault {
     /// Answer with this refusal; an empty code is a proxy's answer.
     Refuse(u16, &'static str, Option<u64>),
     /// Send the headers and this many body bytes, then drop the connection.
@@ -148,28 +148,28 @@ enum Fault {
 }
 
 #[derive(Default)]
-struct Mock {
-    name: String,
-    files: Vec<(String, Vec<u8>)>,
+pub(in crate::commands) struct Mock {
+    pub(in crate::commands) name: String,
+    pub(in crate::commands) files: Vec<(String, Vec<u8>)>,
     /// Files per manifest page, whatever `limit` asks for.
-    page: usize,
+    pub(in crate::commands) page: usize,
     /// List a SHA-256 for every file, like a dataset that was uploaded with rmsctl.
-    with_sha: bool,
+    pub(in crate::commands) with_sha: bool,
     /// Faults for the content requests of a path, used up in order.
-    faults: HashMap<String, VecDeque<Fault>>,
+    pub(in crate::commands) faults: HashMap<String, VecDeque<Fault>>,
     /// Extra manifest entries the dataset does not really have.
-    extra_listing: Vec<(String, u64)>,
+    pub(in crate::commands) extra_listing: Vec<(String, u64)>,
     /// List these files with a size they do not have.
-    listed_size: HashMap<String, u64>,
+    pub(in crate::commands) listed_size: HashMap<String, u64>,
     /// Answer the manifest like a server that predates the API.
-    no_files_api: bool,
+    pub(in crate::commands) no_files_api: bool,
     /// `METHOD path [range]`, one line per request.
-    log: Vec<String>,
-    max_in_flight: usize,
+    pub(in crate::commands) log: Vec<String>,
+    pub(in crate::commands) max_in_flight: usize,
 }
 
 impl Mock {
-    fn tree() -> Self {
+    pub(in crate::commands) fn tree() -> Self {
         Mock {
             name: "g1 bottle/sorting".into(),
             page: 2,
@@ -465,12 +465,12 @@ async fn serve_connection(
     }
 }
 
-struct Server {
-    mock: Arc<Mutex<Mock>>,
-    client: ApiClient,
+pub(in crate::commands) struct Server {
+    pub(in crate::commands) mock: Arc<Mutex<Mock>>,
+    pub(in crate::commands) client: ApiClient,
 }
 
-async fn server(mock: Mock) -> Server {
+pub(in crate::commands) async fn server(mock: Mock) -> Server {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let mock = Arc::new(Mutex::new(mock));
@@ -491,7 +491,7 @@ async fn server(mock: Mock) -> Server {
     Server { mock, client }
 }
 
-fn ctx() -> Ctx {
+pub(in crate::commands) fn ctx() -> Ctx {
     // --json doubles as the quiet mode, which keeps the test output readable.
     Ctx {
         json: true,

@@ -16,7 +16,7 @@ use tokio::net::{TcpListener, TcpStream};
 // ── Pure helpers ────────────────────────────────────────────────────────
 
 #[test]
-fn only_files_of_a_lerobot_tree_are_selected() {
+fn the_lerobot_tree_is_told_from_what_lies_beside_it() {
     for yes in [
         "meta/info.json",
         "meta/stats.json",
@@ -25,7 +25,7 @@ fn only_files_of_a_lerobot_tree_are_selected() {
         "videos/observation.images.head/chunk-000/file-000.mp4",
         "images/observation.images.head/episode_000000/frame_000000.png",
     ] {
-        assert!(is_dataset_file(yes), "{yes} should be uploaded");
+        assert!(is_dataset_file(yes), "{yes} is part of the tree");
     }
     for no in [
         "README.md",
@@ -37,7 +37,7 @@ fn only_files_of_a_lerobot_tree_are_selected() {
         "metadata/info.json",
         "meta",
     ] {
-        assert!(!is_dataset_file(no), "{no} should be left out");
+        assert!(!is_dataset_file(no), "{no} is beside the tree");
     }
 }
 
@@ -243,7 +243,8 @@ fn pattern(len: usize, seed: u8) -> Vec<u8> {
 const INFO: &str = r#"{"codebase_version":"v3.0","robot_type":"unitree_g1_dex3","fps":30,"total_episodes":2,
   "features":{"action":{"dtype":"float32","shape":[31]},"observation.state":{"dtype":"float32","shape":[31]}}}"#;
 
-/// A miniature v3.0 tree, plus things that do not belong to one. With the
+/// A miniature v3.0 tree, plus two files beside it (uploaded as well) and a
+/// `.git` (never uploaded). With the
 /// mock's 16-byte parts the files cover: several full parts plus a remainder,
 /// an exact multiple, a single part, and an empty file.
 fn dataset(tag: &str) -> Scratch {
@@ -256,31 +257,241 @@ fn dataset(tag: &str) -> Scratch {
         "videos/observation.images.head/chunk-000/file-000.mp4",
         &pattern(100, 3),
     );
-    s.write("README.md", b"not part of the dataset");
-    s.write(".git/objects/aa/bb", b"nor is this");
-    s.write("data/chunk-000/notes.txt", b"nor this");
+    s.write("README.md", README);
+    s.write(".git/objects/aa/bb", b"not dataset content");
+    s.write("data/chunk-000/notes.txt", NOTES);
     s
 }
 
+const README: &[u8] = b"# about this dataset\n";
+const NOTES: &[u8] = b"a note\n";
+/// The five files of the fixture's LeRobot tree.
+const TREE: [&str; 5] = [
+    "data/chunk-000/file-000.parquet",
+    "meta/empty.jsonl",
+    "meta/episodes/chunk-000/file-000.parquet",
+    "meta/info.json",
+    "videos/observation.images.head/chunk-000/file-000.mp4",
+];
+
+fn rules(exclude: &[&str]) -> ScanRules {
+    ScanRules {
+        exclude: exclude.iter().map(|s| s.to_string()).collect(),
+        ..Default::default()
+    }
+}
+
+fn rels(scan: &Scan) -> Vec<&str> {
+    scan.files.iter().map(|f| f.rel.as_str()).collect()
+}
+
+fn left_out(scan: &Scan) -> Vec<(&str, &str)> {
+    scan.skipped
+        .iter()
+        .map(|s| (s.rel.as_str(), s.why.as_str()))
+        .collect()
+}
+
 #[test]
-fn scan_collects_the_tree_and_leaves_the_rest() {
+fn scan_takes_every_file_and_names_what_it_leaves_out() {
     let s = dataset("scan");
-    let scan = scan_dir(&s.0).unwrap();
-    let rels: Vec<&str> = scan.files.iter().map(|f| f.rel.as_str()).collect();
+    let scan = scan_dir(&s.0, &ScanRules::default()).unwrap();
     assert_eq!(
-        rels,
+        rels(&scan),
         [
+            "README.md",
             "data/chunk-000/file-000.parquet",
+            "data/chunk-000/notes.txt",
             "meta/empty.jsonl",
             "meta/episodes/chunk-000/file-000.parquet",
             "meta/info.json",
             "videos/observation.images.head/chunk-000/file-000.mp4",
         ]
     );
-    assert_eq!(scan.total_bytes(), 32 + 40 + 100 + INFO.len() as u64);
-    // README.md, .git (not walked: one entry) and data/…/notes.txt
-    assert_eq!(scan.skipped, 3);
+    assert_eq!(
+        scan.total_bytes(),
+        32 + 40 + 100 + (INFO.len() + README.len() + NOTES.len()) as u64
+    );
+    // .git is not walked: one entry stands for all it holds
+    assert_eq!(left_out(&scan), [(".git/", "version-control data")]);
     assert!(scan.files.iter().all(|f| f.abs.is_file()));
+}
+
+#[test]
+fn junk_that_is_not_dataset_content_is_left_out_by_name() {
+    let s = dataset("junk");
+    s.write(".DS_Store", b"x");
+    s.write("videos/.DS_Store", b"x");
+    s.write("scripts/__pycache__/convert.cpython-312.pyc", b"x");
+    s.write("scripts/convert.py", b"print()");
+    s.write(".cache/huggingface/download/meta/info.json.metadata", b"x");
+    s.write(
+        "notes/.cache/kept.txt",
+        b"only a top-level .cache is the Hub's",
+    );
+    s.write("videos/half.mp4.rmsctl-part", b"x");
+    s.write(".gitattributes", b"*.mp4 filter=lfs");
+    std::fs::create_dir_all(s.path("empty/inner")).unwrap();
+
+    let scan = scan_dir(&s.0, &ScanRules::default()).unwrap();
+    let files = rels(&scan);
+    for kept in [
+        ".gitattributes",
+        "scripts/convert.py",
+        "notes/.cache/kept.txt",
+        "README.md",
+    ] {
+        assert!(files.contains(&kept), "{kept} is dataset content");
+    }
+    assert_eq!(files.len(), 7 + 3);
+    assert_eq!(
+        left_out(&scan),
+        [
+            (".DS_Store", "macOS Finder metadata"),
+            (".cache/", "Hugging Face download cache"),
+            (".git/", "version-control data"),
+            (
+                "empty/inner/",
+                "an empty directory — only files can be stored"
+            ),
+            ("scripts/__pycache__/", "Python bytecode cache"),
+            ("videos/.DS_Store", "macOS Finder metadata"),
+            (
+                "videos/half.mp4.rmsctl-part",
+                "an unfinished rmsctl download"
+            ),
+        ]
+    );
+
+    // --no-default-excludes takes them too — all but the part file, which a
+    // download could never write back.
+    let all = scan_dir(
+        &s.0,
+        &ScanRules {
+            no_default_excludes: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(rels(&all).contains(&".git/objects/aa/bb"));
+    assert!(rels(&all).contains(&".DS_Store"));
+    assert_eq!(
+        left_out(&all),
+        [
+            (
+                "empty/inner/",
+                "an empty directory — only files can be stored"
+            ),
+            (
+                "videos/half.mp4.rmsctl-part",
+                "an unfinished rmsctl download"
+            ),
+        ]
+    );
+}
+
+#[test]
+fn exclude_leaves_out_files_and_whole_directories_and_says_so() {
+    let s = dataset("exclude");
+    s.write("raw/session-1.bag", b"big");
+    s.write("raw/deep/session-2.bag", b"big");
+    s.write("logs/run.log", b"x");
+    s.write("meta/debug.log", b"x");
+    s.write("übersicht — späte Schicht.md", "Notizen".as_bytes());
+
+    let scan = scan_dir(&s.0, &rules(&["raw", "*.log", "data/*/notes.txt"])).unwrap();
+    assert_eq!(
+        rels(&scan),
+        [
+            "README.md",
+            "data/chunk-000/file-000.parquet",
+            "meta/empty.jsonl",
+            "meta/episodes/chunk-000/file-000.parquet",
+            "meta/info.json",
+            "videos/observation.images.head/chunk-000/file-000.mp4",
+            "übersicht — späte Schicht.md",
+        ]
+    );
+    assert_eq!(
+        left_out(&scan),
+        [
+            (".git/", "version-control data"),
+            ("data/chunk-000/notes.txt", "--exclude data/*/notes.txt"),
+            ("logs/run.log", "--exclude *.log"),
+            ("meta/debug.log", "--exclude *.log"),
+            ("raw/", "--exclude raw"),
+        ]
+    );
+    // every left-out entry is a line; a long list is cut with a count
+    assert_eq!(skipped_lines(&scan.skipped, usize::MAX).len(), 5);
+    let cut = skipped_lines(&scan.skipped, 2);
+    assert_eq!(cut.len(), 3);
+    assert_eq!(cut[0], ".git/  (version-control data)");
+    assert_eq!(cut[2], "… and 3 more");
+}
+
+#[test]
+fn lerobot_only_narrows_the_scan_to_the_tree_and_lists_the_rest() {
+    let s = dataset("treeonly");
+    let scan = scan_dir(
+        &s.0,
+        &ScanRules {
+            lerobot_only: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(rels(&scan), TREE);
+    assert_eq!(
+        left_out(&scan),
+        [
+            (".git/", "version-control data"),
+            ("README.md", "not part of the LeRobot tree (--lerobot-only)"),
+            (
+                "data/chunk-000/notes.txt",
+                "not part of the LeRobot tree (--lerobot-only)"
+            ),
+        ]
+    );
+}
+
+#[test]
+fn a_name_the_server_would_refuse_is_named_before_anything_is_sent() {
+    assert!(unstorable_reason("docs/übersicht — späte Schicht.md").is_none());
+    assert!(unstorable_reason("a b/c'd.txt").is_none());
+    assert!(unstorable_reason(&"x".repeat(1025)).is_some());
+    assert!(unstorable_reason("C:notes.txt").is_some());
+    #[cfg(unix)]
+    {
+        let s = dataset("oddname");
+        s.write("notes/back\\slash.txt", b"x");
+        let err = scan_dir(&s.0, &ScanRules::default())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("backslash"), "{err}");
+        assert!(err.contains("--exclude"), "{err}");
+        // …and excluding it is the way out
+        assert!(scan_dir(&s.0, &rules(&["notes"])).is_ok());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_dangling_symlink_stops_the_scan_unless_it_is_excluded() {
+    let s = dataset("dangling");
+    std::os::unix::fs::symlink(s.path("gone.bin"), s.path("calibration.bin")).unwrap();
+    let err = scan_dir(&s.0, &ScanRules::default())
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("calibration.bin"), "{err}");
+    assert!(err.contains("symbolic link"), "{err}");
+
+    let scan = scan_dir(&s.0, &rules(&["calibration.bin"])).unwrap();
+    assert!(
+        left_out(&scan).contains(&("calibration.bin", "--exclude calibration.bin")),
+        "{:?}",
+        scan.skipped
+    );
 }
 
 #[cfg(unix)]
@@ -293,7 +504,7 @@ fn scan_follows_symlinks_like_a_hub_cache_snapshot() {
         s.path("data/chunk-000/file-001.parquet"),
     )
     .unwrap();
-    let scan = scan_dir(&s.0).unwrap();
+    let scan = scan_dir(&s.0, &ScanRules::default()).unwrap();
     let linked = scan
         .files
         .iter()
@@ -502,6 +713,9 @@ struct Mock {
     early_busy: u32,
     /// Refuse the n-th part request (counted from 1) with a 502.
     refuse_put_number: Option<usize>,
+    /// Behave like a server before RMS TASK-500: keep only the LeRobot tree
+    /// and answer with the other declared files under `ignored`.
+    tree_only: bool,
     /// Parts to "lose" when finish is first called.
     lose_on_finish: Vec<(u64, u32)>,
     start_body: Option<Value>,
@@ -606,10 +820,20 @@ impl Mock {
                 None => {}
             }
             let req: Value = serde_json::from_slice(body).unwrap();
+            let tree_only = self.tree_only;
+            let ignored: Vec<Value> = req["files"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|f| f["path"].as_str())
+                .filter(|p| tree_only && !is_dataset_file(p))
+                .map(|p| json!({ "path": p, "reason": "not part of a LeRobot dataset tree" }))
+                .collect();
             self.files = req["files"]
                 .as_array()
                 .unwrap()
                 .iter()
+                .filter(|f| !tree_only || is_dataset_file(f["path"].as_str().unwrap()))
                 .map(|f| MockFile {
                     path: f["path"].as_str().unwrap().into(),
                     size: f["size"].as_u64().unwrap(),
@@ -630,7 +854,7 @@ impl Mock {
                 201,
                 None,
                 json!({ "datasetId": DS, "status": "uploading", "state": "uploading", "robotTypeId": "rt-1",
-                        "storage": "rustfs", "chunkSize": self.chunk, "files": files, "ignored": [],
+                        "storage": "rustfs", "chunkSize": self.chunk, "files": files, "ignored": ignored,
                         "idleTimeoutSeconds": 21600, "expiresAt": "2026-11-13T16:00:00.000Z" }),
             );
         }
@@ -958,6 +1182,7 @@ fn options(dir: &Path, state: &Scratch) -> UploadOptions {
         no_wait: false,
         wait_timeout: Duration::from_secs(20),
         part_timeout: Duration::from_secs(20),
+        rules: ScanRules::default(),
         state_dir: Some(state.0.clone()),
         tuning: Tuning {
             backoff_base: ms(1),
@@ -999,7 +1224,7 @@ async fn uploads_a_tree_in_parts_and_waits_for_ready() {
     assert!(m.bad_requests.is_empty(), "{:?}", m.bad_requests);
     assert_stored_matches_disk(&m, &data.0);
 
-    // the manifest: only the tree, with whole-file hashes and the flags
+    // the manifest: every file of the directory, with whole-file hashes and the flags
     let body = m.start_body.as_ref().unwrap();
     assert_eq!(body["name"], "g1 bottle sorting");
     assert_eq!(body["description"], "sim data");
@@ -1012,12 +1237,10 @@ async fn uploads_a_tree_in_parts_and_waits_for_ready() {
         .iter()
         .map(|f| f["path"].as_str().unwrap())
         .collect();
-    assert_eq!(paths.len(), 5);
-    assert!(
-        !paths
-            .iter()
-            .any(|p| p.contains("README") || p.contains(".git") || p.contains("notes"))
-    );
+    assert_eq!(paths.len(), 7);
+    assert!(paths.contains(&"README.md"));
+    assert!(paths.contains(&"data/chunk-000/notes.txt"));
+    assert!(!paths.iter().any(|p| p.contains(".git")));
     for f in &m.files {
         let disk = std::fs::read(data.0.join(&f.path)).unwrap();
         assert_eq!(
@@ -1028,12 +1251,15 @@ async fn uploads_a_tree_in_parts_and_waits_for_ready() {
         );
     }
 
-    // parts: 100 B → 7, 40 B → 3, 32 B → 2, info.json, and the empty file's
-    // single empty part
+    // parts: 100 B → 7, 40 B → 3, 32 B → 2, info.json, the empty file's
+    // single empty part, README.md (21 B → 2) and notes.txt (7 B → 1)
     let info_parts = part_count(INFO.len() as u64, 16) as usize;
-    assert_eq!(m.puts().len(), 7 + 3 + 2 + info_parts + 1);
+    assert_eq!(m.puts().len(), 7 + 3 + 2 + info_parts + 1 + 2 + 1);
     assert_eq!(outcome.parts_sent, m.puts().len());
-    assert_eq!(outcome.bytes_sent, 100 + 40 + 32 + INFO.len() as u64);
+    assert_eq!(
+        outcome.bytes_sent,
+        100 + 40 + 32 + (INFO.len() + README.len() + NOTES.len()) as u64
+    );
     assert_eq!(
         m.count(&format!("POST /api/datasets/{DS}/upload/finish")),
         1
@@ -1114,7 +1340,7 @@ async fn resume_by_id_works_without_a_note_and_refuses_a_changed_directory() {
     let srv = server(Mock::new(16)).await;
 
     // An upload started elsewhere: declared, with the first video part held.
-    let scan = scan_dir(&data.0).unwrap();
+    let scan = scan_dir(&data.0, &ScanRules::default()).unwrap();
     {
         let mut m = srv.mock.lock().unwrap();
         m.files = scan
@@ -1444,7 +1670,11 @@ async fn waiting_for_the_verdict_gives_up_after_the_timeout() {
 async fn a_file_that_shrank_after_it_was_declared_stops_the_upload() {
     let data = dataset("shrunk");
     let srv = server(Mock::new(16)).await;
-    let scan = scan_dir(&std::fs::canonicalize(&data.0).unwrap()).unwrap();
+    let scan = scan_dir(
+        &std::fs::canonicalize(&data.0).unwrap(),
+        &ScanRules::default(),
+    )
+    .unwrap();
     {
         let mut m = srv.mock.lock().unwrap();
         m.files = scan
@@ -1758,4 +1988,112 @@ async fn a_refusal_before_the_body_is_read_stops_the_stream_and_the_count() {
     for poured in &m.poured_after_refusal {
         assert!(*poured < 8 * MIB, "{poured} bytes sent after the refusal");
     }
+}
+
+// ── Everything in the directory, and servers that will not store it ─────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn exclude_and_lerobot_only_decide_what_is_declared() {
+    let data = dataset("declared");
+    data.write("raw/session.bag", &pattern(50, 4));
+    data.write("docs/übersicht — späte Schicht.md", "Notizen".as_bytes());
+    data.write("docs/empty.txt", b"");
+
+    let srv = server(Mock::new(16)).await;
+    let mut opts = options(&data.0, &srv.state);
+    opts.rules = rules(&["raw", "*.txt"]);
+    upload(&srv.client, &ctx(true), &opts).await.unwrap();
+    {
+        let m = srv.mock.lock().unwrap();
+        let mut paths: Vec<&str> = m.files.iter().map(|f| f.path.as_str()).collect();
+        paths.sort();
+        let mut expected = TREE.to_vec();
+        expected.extend(["README.md", "docs/übersicht — späte Schicht.md"]);
+        expected.sort();
+        assert_eq!(paths, expected);
+        assert_stored_matches_disk(&m, &data.0);
+        assert!(m.bad_requests.is_empty(), "{:?}", m.bad_requests);
+    }
+
+    // the empty file beside the tree goes as one empty part
+    let srv = server(Mock::new(16)).await;
+    let opts = options(&data.0, &srv.state);
+    upload(&srv.client, &ctx(true), &opts).await.unwrap();
+    {
+        let m = srv.mock.lock().unwrap();
+        let empty = m
+            .files
+            .iter()
+            .position(|f| f.path == "docs/empty.txt")
+            .expect("the empty file is declared");
+        assert_eq!(m.files[empty].size, 0);
+        assert_eq!(m.assembled(empty as u64), b"");
+        assert!(m.files.iter().any(|f| f.path == "raw/session.bag"));
+        assert_stored_matches_disk(&m, &data.0);
+    }
+
+    let srv = server(Mock::new(16)).await;
+    let mut opts = options(&data.0, &srv.state);
+    opts.rules.lerobot_only = true;
+    upload(&srv.client, &ctx(true), &opts).await.unwrap();
+    let m = srv.mock.lock().unwrap();
+    let mut paths: Vec<&str> = m.files.iter().map(|f| f.path.as_str()).collect();
+    paths.sort();
+    assert_eq!(paths, TREE);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_server_that_keeps_only_the_tree_is_refused_before_a_byte_is_sent() {
+    let data = dataset("oldserver");
+    let mut mock = Mock::new(16);
+    mock.tree_only = true;
+    let srv = server(mock).await;
+    let opts = options(&data.0, &srv.state);
+
+    let err = upload(&srv.client, &ctx(true), &opts)
+        .await
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("stores only the LeRobot tree"), "{err}");
+    assert!(
+        err.contains("README.md, data/chunk-000/notes.txt"),
+        "the files it would drop are named: {err}"
+    );
+    assert!(err.contains("has been cancelled"), "{err}");
+    assert!(err.contains("--lerobot-only"), "{err}");
+    let m = srv.mock.lock().unwrap();
+    assert!(m.puts().is_empty(), "no part was sent: {:?}", m.log);
+    assert_eq!(
+        m.count(&format!("POST /api/datasets/{DS}/upload/cancel")),
+        1
+    );
+    assert_eq!(m.state, "cancelled", "nothing is left on the server");
+    assert_eq!(
+        m.count(&format!("POST /api/datasets/{DS}/upload/finish")),
+        0
+    );
+    // and no note: the next run starts clean
+    assert_eq!(std::fs::read_dir(&srv.state.0).unwrap().count(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lerobot_only_still_uploads_to_a_server_that_keeps_only_the_tree() {
+    let data = dataset("oldserver-tree");
+    let mut mock = Mock::new(16);
+    mock.tree_only = true;
+    let srv = server(mock).await;
+    let mut opts = options(&data.0, &srv.state);
+    opts.rules.lerobot_only = true;
+
+    let outcome = upload(&srv.client, &ctx(true), &opts).await.unwrap();
+
+    assert_eq!(outcome.status, "ready");
+    let m = srv.mock.lock().unwrap();
+    assert_eq!(m.files.len(), 5);
+    assert_stored_matches_disk(&m, &data.0);
+    assert_eq!(
+        m.count(&format!("POST /api/datasets/{DS}/upload/cancel")),
+        0
+    );
 }

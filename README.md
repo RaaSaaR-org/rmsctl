@@ -154,7 +154,8 @@ rmsctl datasets quality <id> | stats <id>        # Qualitaet & Statistik
 rmsctl datasets validate <id> [--advanced]       # Validierung
 rmsctl datasets push <id> --hf-token X --repo-id org/name
 rmsctl datasets push-status <id>
-rmsctl datasets upload <dir> [--name X]          # LeRobot-Verzeichnis direkt hochladen (ohne Hugging Face)
+rmsctl datasets upload <dir> [--name X]          # Datensatz-Verzeichnis direkt hochladen, mit allen Dateien (ohne Hugging Face)
+rmsctl datasets verify <id> <dir>                # Pruefen, dass alles aus <dir> auf der Instanz liegt (vor dem Loeschen!)
 rmsctl datasets upload-status <id>               # Was der Server von einem Upload haelt
 rmsctl datasets upload-cancel <id>               # Upload abbrechen, Gespeichertes loeschen
 rmsctl datasets download <id> [--out <dir>]      # Datensatz als LeRobot-Verzeichnis zurueckholen
@@ -176,22 +177,33 @@ Rechner direkt in eine RMS-Instanz — ohne Umweg ueber Hugging Face. Der Datens
 im selben Zustand wie nach einem Hub-Import: Datensatzseite, Episoden-Browser, Video und
 Training funktionieren unveraendert.
 
+**Hochgeladen wird jede regulaere Datei des Verzeichnisses** — der LeRobot-Baum, die
+`README.md` und alles, was sonst darin liegt —, damit `datasets download` das Verzeichnis
+spaeter Byte fuer Byte zurueckbringt.
+
 ```bash
-# 1. Ansehen, was passieren wuerde (sendet nichts)
+# 1. Ansehen, was passieren wuerde (sendet nichts) — listet auch jede Datei, die NICHT mitgeht
 rmsctl --server https://neodem.example/api datasets upload /data/g1-dex3-bottle-sorting-sim
 
 # 2. Hochladen, auf die Validierung warten, Ergebnis ausgeben
 rmsctl --server https://neodem.example/api datasets upload /data/g1-dex3-bottle-sorting-sim \
   --name "G1 Dex3 bottle sorting" --yes
+
+# 3. Bevor das lokale Verzeichnis geloescht wird: pruefen, dass alles angekommen ist
+rmsctl --server https://neodem.example/api datasets verify <dataset-id> /data/g1-dex3-bottle-sorting-sim \
+  && rm -rf /data/g1-dex3-bottle-sorting-sim
 ```
 
 ```
   ◈ Upload: G1 Dex3 bottle sorting
     │ Source         /data/g1-dex3-bottle-sorting-sim
     │ Format         LeRobot v3.0 · unitree_g1_dex3 · 30 fps · 80 episodes
-    │ Files          7 (446.1 MB) — 1 other entry left out
-  [OK] Upload started: dataset 3fb4173c-… (rustfs store, 32 MiB parts, 19 part(s))
-    │ Uploading      ████████░░░░░░░░░░░░  41.2%  183.8 MB / 446.1 MB · 5/7 files · 12.4 MB/s · ETA 21s
+    │ Files          9 (446.1 MB) — everything in the directory, 1 beside the LeRobot tree
+    │ Left out       2 entries — NOT uploaded:
+      - .git/  (version-control data)
+      - raw/  (--exclude raw)
+  [OK] Upload started: dataset 3fb4173c-… (rustfs store, 32 MiB parts, 21 part(s))
+    │ Uploading      ████████░░░░░░░░░░░░  41.2%  183.8 MB / 446.1 MB · 6/9 files · 12.4 MB/s · ETA 21s
   [OK] Sent 446.1 MB in 36s (12.4 MB/s)
   [--] The server is assembling the files and verifying checksums …
   [OK] Dataset ready
@@ -203,13 +215,42 @@ rmsctl --server https://neodem.example/api datasets upload /data/g1-dex3-bottle-
     │ Result         valid
 ```
 
-`<dir>` ist das Verzeichnis, das `meta/` und `data/` enthaelt. Gesendet werden nur die
-Dateien eines LeRobot-Baums (`meta/**`, `data/**/*.parquet`, `videos/**/*.mp4`,
-`images/**`); `README.md`, `.git` usw. bleiben liegen. Ohne `videos/` entsteht ein
-Datensatz im Modus `metadata`.
+`<dir>` ist das Verzeichnis, das `meta/` und `data/` enthaelt. Ohne `videos/` entsteht
+ein Datensatz im Modus `metadata`.
+
+**Was nicht mitgeht** — und nur das:
+
+| Ausgelassen | Warum |
+| --- | --- |
+| `.git`, `.DS_Store`, `__pycache__` (in jeder Tiefe), `.cache/` (nur ganz oben) | kein Datensatz-Inhalt: Versionsverwaltung, Finder, Python-Bytecode, der Download-Cache von `huggingface-cli` |
+| `*.rmsctl-part` | angefangener `rmsctl`-Download; liesse sich nie zurueckholen |
+| alles, was ein `--exclude <glob>` trifft | vom Aufrufer gewollt |
+| leere Verzeichnisse, Sockets, Pipes | es werden Dateien gespeichert, keine Verzeichnisse |
+
+Nichts davon faellt still weg: Der Lauf ohne `--yes` listet jeden ausgelassenen Eintrag
+mit Grund (`Left out`), der Lauf mit `--yes` die ersten zwoelf und die Anzahl. Ein
+Verzeichnis-Eintrag (`raw/`) steht fuer alles darunter.
+
+**Symlinks** wird gefolgt (ein Hub-Cache-Snapshot besteht aus Links nach `blobs/`): Eine
+verlinkte Datei oder ein verlinktes Verzeichnis wird mit dem Inhalt des Ziels
+hochgeladen und kommt beim Download als normale Datei zurueck. Ein Link, dessen Ziel
+fehlt, bricht den Befehl ab, bevor etwas gesendet wird — reparieren, entfernen oder per
+`--exclude` auslassen. Ebenso ein Dateiname, den der Server ablehnen wuerde (Backslash,
+Steuerzeichen, kein gueltiges UTF-8, Pfad ueber 1024 Bytes).
+
+**Aeltere Server** (vor RMS TASK-500) speichern nur den LeRobot-Baum (`meta/**`,
+`data/**/*.parquet`, `videos/**/*.mp4`, `images/**`) und lassen alles andere fallen. Das
+erkennt `rmsctl` an der Antwort auf die Anmeldung, **bricht ab, bevor ein Byte gesendet
+ist**, nimmt den geoeffneten Upload zurueck und nennt die Dateien, die verloren gingen
+("this server stores only the LeRobot tree …"). Gegen einen solchen Server laedt
+`--lerobot-only` wie frueher nur den Baum hoch — die uebrigen Dateien liegen dann
+**nicht** auf der Instanz und duerfen lokal nicht geloescht werden.
 
 | Flag | Bedeutung |
 | --- | --- |
+| `--exclude <glob>` | Dateien auslassen (wiederholbar), Syntax wie bei `models upload`: `*.log` und `raw` treffen in jeder Tiefe, `data/*/notes.txt` ist am Verzeichnis verankert, `**` ueberspringt Ebenen; ein Treffer auf ein Verzeichnis laesst alles darunter aus |
+| `--lerobot-only` | Nur den LeRobot-Baum hochladen (fuer Server, die nichts anderes speichern) |
+| `--no-default-excludes` | Auch `.git`, `.DS_Store`, `__pycache__` und `.cache/` hochladen |
 | `--name`, `--description` | Name (Default: Verzeichnisname) und Beschreibung |
 | `--robot-type <id>` | Robotertyp festlegen; sonst wird er aus `meta/info.json` zugeordnet oder angelegt |
 | `--chunk-size <groesse>` | Teilgroesse, z. B. `8M` (min. 5M; Default und Maximum setzt der Server: 32M) |
@@ -236,10 +277,63 @@ Datensatz im Modus `metadata`.
 - **Pruefsummen:** Jeder Teil traegt seinen SHA-256 (`X-Chunk-Sha256`); zusaetzlich wird
   pro Datei ein SHA-256 angemeldet, den der Server nach dem Zusammensetzen gegenliest.
 
+#### Vor dem Loeschen pruefen: `datasets verify`
+
+`rmsctl datasets verify <id> <dir>` beantwortet die Frage "liegt alles aus diesem
+Verzeichnis auf der Instanz?" — der Schritt zwischen `datasets upload` und dem Loeschen
+der lokalen Kopie. Verglichen wird das Verzeichnis mit der Dateiliste der Instanz:
+gleiche relative Pfade, gleiche Groessen, und der SHA-256 ueberall dort, wo die Instanz
+einen hat (bei jedem Datensatz, der mit `rmsctl datasets upload` ohne `--no-checksum`
+hochgeladen wurde). Geholt wird **nur die Dateiliste**, keine Datei; die lokalen Dateien
+werden einmal gelesen und gehasht.
+
+```
+  ◈ Verify: g1-dex3-bottle-sorting-sim
+    │ Dataset        ca244af7-4182-422a-bd33-d55dfa7478b4
+    │ Status         ready
+    │ Local          /data/g1-dex3-bottle-sorting-sim — 9 file(s), 446.1 MB
+    │ Instance       9 file(s), 446.1 MB · rustfs store
+  [--] Hashing 9 local file(s), 446.1 MB …
+    │ Compared       path and size of every file · SHA-256 of 9
+  [OK] Every one of the 9 file(s), 446.1 MB, is on the instance with the same path and size, and the same SHA-256 (9 files)
+```
+
+Jede Abweichung wird genannt, und der Befehl endet mit Exit 1:
+
+```
+  [!] 4 difference(s) between /data/g1-dex3-bottle-sorting-sim and the instance:
+      - only on the instance     README.md  (11.8 kB — not in the directory)
+      - missing on the instance  calib/new.yaml  (4 B locally)
+      - content differs          data/chunk-000/file-000.parquet  (same size, SHA-256 edb088808a05… locally, 55577747fa46… on the instance)
+      - size differs             meta/stats.json  (36656 bytes locally, 36654 on the instance)
+  [ERR] /data/g1-dex3-bottle-sorting-sim does not match dataset 9bb8da21-…: 4 difference(s) — do not delete the local copy
+```
+
+- **Gleiche Regeln wie beim Upload:** Das Verzeichnis wird so gelesen, wie `datasets
+  upload` es liest. Wer mit `--exclude raw` oder `--lerobot-only` hochgeladen hat, gibt
+  dieselben Flags hier an; sonst zaehlen die ausgelassenen Dateien als "missing on the
+  instance". Was die Regeln auslassen (`.git`, ein `--exclude`), wird unter `Left out`
+  aufgelistet — es liegt nicht auf der Instanz und verschwindet mit dem Verzeichnis.
+- **Auch die andere Richtung zaehlt:** Eine Datei, die nur auf der Instanz liegt, ist
+  eine Abweichung. Nach einem erfolgreichen `verify` ist `download` + `diff -r` leer
+  (bis auf die unter `Left out` genannten Eintraege).
+- **Ohne SHA-256 auf der Instanz** (Hub-Import, Upload mit `--no-checksum`) entscheidet
+  die Groesse; der Befehl sagt, wie viele Dateien nur so verglichen wurden.
+  `--require-checksum` macht daraus einen Fehler, `--no-checksum` vergleicht absichtlich
+  nur Groessen (schnell, liest keine Datei).
+- **Datensatz von einem aelteren Server oder aelteren `rmsctl`:** dort fehlt z. B. die
+  `README.md` auf der Instanz — `verify` meldet sie als "missing on the instance".
+- **`--json`:** ein Objekt mit `match`, `localFiles`, `remoteFiles`, `sha256Compared`,
+  `sizeOnly`, `differences[] { path, kind, detail }` und `leftOut[] { path, reason }`;
+  `kind` ist `missingOnInstance`, `onlyOnInstance`, `size`, `sha256` oder `noChecksum`.
+  Der Exit-Code ist derselbe.
+- Der Befehl aendert nichts und braucht kein `--yes`. Server: braucht die Datei-API
+  (RMS TASK-496).
+
 #### Datensatz herunterladen
 
 `rmsctl datasets download` holt einen Datensatz aus einer RMS-Instanz zurueck — als das
-LeRobot-Verzeichnis, als das er gespeichert ist: `meta/`, `data/`, `videos/` … mit
+Verzeichnis, als das er gespeichert ist: `meta/`, `data/`, `videos/`, `README.md` … mit
 denselben relativen Pfaden und denselben Bytes, direkt aus dem Speicher der Instanz, ohne
 Hugging Face. Das ist der Rueckweg fuer Datensaetze, die mit `datasets upload` ausgelagert
 wurden, um lokal Platz zu schaffen; es funktioniert genauso fuer Hub-Importe.
