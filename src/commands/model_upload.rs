@@ -509,6 +509,26 @@ pub async fn upload(
         }
     }
 
+    // The upload remembered for this directory is past sending and is another
+    // model than the one asked for now (a run with --no-wait, or one stopped
+    // while the server was still verifying, leaves its note behind). Reporting
+    // it would say "registered" about the wrong version and send nothing.
+    let other_model = existing.as_ref().is_some_and(|(_, status)| {
+        matches!(status.state.as_str(), "processing" | "completed")
+            && (status.name.as_deref() != Some(name.as_str())
+                || status.version.as_deref() != Some(version.as_str()))
+    });
+    if other_model
+        && !explicit
+        && let Some((id, status)) = existing.take()
+    {
+        ui.info(&format!(
+            "The upload remembered for this directory ({id}) is \"{}\" and needs nothing more sent — starting a new one for \"{name}\" {version}.",
+            status.label()
+        ));
+        store.remove();
+    }
+
     let stopped = |upload_id: String, state: &str| ModelUploadOutcome {
         upload_id,
         state: state.to_string(),
@@ -527,10 +547,27 @@ pub async fn upload(
                     &HashSet::new(),
                     status.chunk_size,
                 )?;
+                let renamed = status.name.as_deref() != Some(name.as_str())
+                    || status.version.as_deref() != Some(version.as_str());
+                // Carrying on would register the directory under the name and
+                // version of the earlier run, not the ones asked for now — and
+                // with --yes nobody reads a warning. Only an upload named with
+                // --resume is continued whatever it is called.
+                if renamed && !explicit {
+                    return Err(RmsError::InvalidInput(format!(
+                        "an upload of this directory is already open as \"{}\" ({id}), and this run asks for \"{name} · {version}\".\n  \
+                         Name, version and the other details are fixed when an upload starts. Either\n  \
+                         - run again with that name and version to resume it,\n  \
+                         - add --restart to discard it and upload as \"{name} · {version}\", or\n  \
+                         - add --resume {id} to finish it as it was started.",
+                        status.label()
+                    )));
+                }
                 ui.field("Resuming", &format!("{id} ({})", status.label()));
-                if status.name.as_deref() != Some(name.as_str())
-                    || status.version.as_deref() != Some(version.as_str())
-                {
+                ui.info(
+                    "Base model, dataset, metrics and notes stay as they were given when this upload started (--restart to change them).",
+                );
+                if renamed {
                     ui.warn(&format!(
                         "Name, version and the other details are fixed when an upload starts; this one stays \"{}\" (--restart to change them)",
                         status.label()

@@ -403,6 +403,13 @@ rmsctl --server https://neodem.example/api models upload /data/runs/pipe_g11 \
   bzw. `rmsctl models upload-cancel <id> --yes`. Ein registriertes Modell wird nicht
   abgebrochen, sondern mit `rmsctl models delete <id> --yes` archiviert; dabei loescht die
   Instanz die gespeicherten Dateien.
+- **Name, Version und Metadaten stehen ab dem Start fest:** Ein fortgesetzter Upload behaelt,
+  was beim ersten Aufruf angegeben wurde. Verlangt ein neuer Aufruf fuer dasselbe Verzeichnis
+  einen anderen Namen oder eine andere Version, waehrend noch ein Upload offen ist, bricht
+  rmsctl mit Exit 1 ab und nennt die Wege: gleiche Angaben (fortsetzen), `--restart`
+  (verwerfen und neu hochladen) oder `--resume <id>` (unveraendert zu Ende bringen).
+  Geaenderte Metriken oder Notizen brauchen ebenfalls `--restart`. Ist der gemerkte Upload
+  schon fertig und ein anderes Modell, beginnt einfach ein neuer.
 - **Grosse Dateien:** Eine 5-GB-Datei sind 149 Teile zu 32 MiB; das Limit liegt bei 10 000
   Teilen pro Datei. Gemessen lokal (Server + RustFS auf demselben Rechner, Quelle auf einer
   Festplatte): 6,9 GB in 15 Dateien in 173 s — 88 s Hashen, 78 s Senden (89 MB/s, begrenzt

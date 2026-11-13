@@ -904,6 +904,96 @@ async fn no_wait_returns_after_finish_and_no_checksum_declares_no_hashes() {
 }
 
 #[tokio::test]
+async fn an_open_upload_is_not_resumed_under_another_name_or_version() {
+    let dir = checkpoint("renamed");
+    let srv = server(Mock {
+        refuse_put_number: Some(2),
+        ..Default::default()
+    })
+    .await;
+    let mut opts = options(&dir.0, &srv.state);
+    opts.parallel = 1;
+    upload(&srv.client, &ctx(true), &opts).await.unwrap_err();
+    {
+        let mut m = srv.mock.lock().unwrap();
+        m.refuse_put_number = None;
+        m.log.clear();
+    }
+
+    // A new version for the same directory: neither sent into the old upload
+    // nor started beside it — the user says which.
+    let mut renamed = options(&dir.0, &srv.state);
+    renamed.version = "v2".into();
+    let err = upload(&srv.client, &ctx(true), &renamed)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("already open as \"synth · v1\""), "{err}");
+    assert!(err.contains("--restart"), "{err}");
+    assert!(err.contains(&format!("--resume {UP}")), "{err}");
+    assert_eq!(srv.mock.lock().unwrap().count("PUT "), 0);
+    assert_eq!(srv.mock.lock().unwrap().count("POST "), 0);
+
+    // Named with --resume, it is finished as it was started.
+    renamed.resume = Some(UP.into());
+    let outcome = upload(&srv.client, &ctx(true), &renamed).await.unwrap();
+    assert_eq!(outcome.state, "completed");
+    let mock = srv.mock.lock().unwrap();
+    assert_eq!(mock.start_body.as_ref().unwrap()["version"], "v1");
+}
+
+#[tokio::test]
+async fn a_finished_upload_of_another_version_is_not_reported_as_this_one() {
+    let dir = checkpoint("otherversion");
+    let srv = server(Mock::default()).await;
+    // --no-wait leaves the note of the upload behind; the server then registers it.
+    let mut opts = options(&dir.0, &srv.state);
+    opts.no_wait = true;
+    upload(&srv.client, &ctx(true), &opts).await.unwrap();
+    assert!(note(&srv, &dir).load().is_some());
+    {
+        let mut m = srv.mock.lock().unwrap();
+        m.state = "completed".into();
+        m.log.clear();
+    }
+
+    // The same directory under a new version is a new model: it is sent.
+    opts.no_wait = false;
+    opts.version = "v2".into();
+    let outcome = upload(&srv.client, &ctx(true), &opts).await.unwrap();
+    assert_eq!(outcome.state, "completed");
+    assert!(outcome.parts_sent > 0, "the new version was actually sent");
+    let mock = srv.mock.lock().unwrap();
+    assert_eq!(
+        mock.count("POST /api/models/uploads"),
+        2,
+        "start and finish"
+    );
+    assert_eq!(mock.start_body.as_ref().unwrap()["version"], "v2");
+}
+
+#[tokio::test]
+async fn a_finished_upload_of_the_same_version_is_still_only_reported() {
+    let dir = checkpoint("sameversion");
+    let srv = server(Mock::default()).await;
+    let mut opts = options(&dir.0, &srv.state);
+    opts.no_wait = true;
+    upload(&srv.client, &ctx(true), &opts).await.unwrap();
+    srv.mock.lock().unwrap().log.clear();
+
+    opts.no_wait = false;
+    let outcome = upload(&srv.client, &ctx(true), &opts).await.unwrap();
+    assert_eq!(outcome.state, "completed");
+    assert_eq!(outcome.parts_sent, 0);
+    let mock = srv.mock.lock().unwrap();
+    assert_eq!(
+        mock.count("POST "),
+        0,
+        "nothing is started or finished again"
+    );
+}
+
+#[tokio::test]
 async fn bad_input_is_refused_before_any_request() {
     let dir = checkpoint("input");
     let srv = server(Mock::default()).await;
