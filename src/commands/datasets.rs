@@ -1,3 +1,4 @@
+use super::dataset_upload;
 use crate::cli::DatasetsCommand;
 use crate::client::ApiClient;
 use crate::ctx::Ctx;
@@ -7,6 +8,7 @@ use crate::output;
 use colored::*;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::time::Duration;
 
 pub async fn run(cmd: &DatasetsCommand, client: &ApiClient, ctx: &Ctx) -> RmsResult<()> {
     match cmd {
@@ -22,6 +24,42 @@ pub async fn run(cmd: &DatasetsCommand, client: &ApiClient, ctx: &Ctx) -> RmsRes
             repo_id,
         } => push(client, ctx, id, hf_token, repo_id).await,
         DatasetsCommand::PushStatus { id } => push_status(client, ctx, id).await,
+        DatasetsCommand::Upload {
+            dir,
+            name,
+            description,
+            robot_type,
+            chunk_size,
+            parallel,
+            retries,
+            resume,
+            restart,
+            no_checksum,
+            no_wait,
+            wait_timeout,
+            part_timeout,
+        } => {
+            let opts = dataset_upload::UploadOptions {
+                dir: dir.clone(),
+                name: name.clone(),
+                description: description.clone(),
+                robot_type: robot_type.clone(),
+                chunk_size: *chunk_size,
+                parallel: *parallel as usize,
+                retries: *retries,
+                resume: resume.clone(),
+                restart: *restart,
+                no_checksum: *no_checksum,
+                no_wait: *no_wait,
+                wait_timeout: Duration::from_secs(*wait_timeout),
+                part_timeout: Duration::from_secs((*part_timeout).max(1)),
+                state_dir: None,
+                tuning: dataset_upload::Tuning::default(),
+            };
+            dataset_upload::run_upload(client, ctx, opts).await
+        }
+        DatasetsCommand::UploadStatus { id } => dataset_upload::status(client, ctx, id).await,
+        DatasetsCommand::UploadCancel { id } => dataset_upload::cancel(client, ctx, id, None).await,
         DatasetsCommand::Flagged { id } => flagged(client, ctx, id).await,
         DatasetsCommand::Flag { id, index, reason } => {
             flag(client, ctx, id, *index, reason.as_deref()).await
@@ -803,6 +841,51 @@ fn render_validation(v: &ValidationSummary) {
     for w in v.warnings.iter().flatten() {
         output::field_colored("Warning", output::truncate(&issue_text(w), 84).yellow());
     }
+}
+
+/// The dataset a direct upload ended as: what `show` leads with, plus the
+/// validation report. Takes the raw `GET /datasets/{id}` body so the upload
+/// module does not need this file's structs.
+pub(super) fn render_result(body: &Value) -> RmsResult<()> {
+    let env: DatasetEnvelope = serde_json::from_value(body.clone())?;
+    let Some(d) = env.dataset else {
+        return Err(RmsError::Other("the server returned no dataset".into()));
+    };
+    output::field("ID", &d.id);
+    output::field("Name", d.label());
+    output::field(
+        "Status",
+        &dataset_status(d.status.as_deref().unwrap_or("unknown")),
+    );
+    output::field(
+        "Robot type",
+        &named(d.robot_type.as_ref(), d.robot_type_id.as_deref()),
+    );
+    output::field("Episodes", &opt_count(d.demonstration_count));
+    output::field("Frames", &opt_count(d.total_frames));
+    if let Some(secs) = d.total_duration {
+        output::field("Duration", &hms(secs));
+    }
+    if let Some(v) = &d.lerobot_version {
+        output::field("LeRobot", v);
+    }
+    if let Some(q) = d.quality_score {
+        output::field("Quality", &format!("{q:.0} / 100"));
+    }
+    if let Some(mode) = &d.import_mode {
+        output::field("Import mode", mode);
+    }
+    if let Some(p) = &d.storage_path {
+        output::field("Storage", &output::truncate(p, 88));
+    }
+    if let Some(err) = &d.import_error {
+        output::field_colored("Import error", output::truncate(err, 84).red());
+    }
+    match &d.validation {
+        Some(v) => render_validation(v),
+        None => output::info("No validation report on the dataset."),
+    }
+    Ok(())
 }
 
 // ── episodes ────────────────────────────────────────────────────────────

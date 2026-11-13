@@ -15,6 +15,7 @@ cargo build --release          # Build release binary (target/release/rmsctl)
 cargo build                    # Debug build
 cargo fmt --check              # Check formatting
 cargo clippy -- -D warnings    # Lint
+cargo test                     # Unit tests + the upload flow against an in-process mock server
 ```
 
 Both gates apply to new command modules too.
@@ -75,6 +76,8 @@ src/
     processes.rs   # list, show, instances, tasks, start, pause, resume, cancel, retry
     compliance.rs  # dashboard, deadlines, gaps, metrics, documents, training, inspections
     datasets.rs    # list, show, episodes, quality, stats, validate, push, flagged, flag
+    dataset_upload.rs        # datasets upload | upload-status | upload-cancel (direct upload)
+    dataset_upload_tests.rs  # its tests, incl. a mock server that speaks the upload contract
     training.rs    # list, show, active, queue, workers, start, cancel, retry, export, estimate
     models.rs      # list, show, lineage, compare
     deployments.rs # list, show, metrics, promote, rollback, cancel
@@ -112,6 +115,38 @@ Anything that changes fleet or deployment state calls
 Without `--yes` the command describes the action and does nothing. The confirm text names
 the specific robot / deployment / session, so a mistyped ID costs nothing. Read-only GETs
 are never gated.
+
+### Direct dataset upload
+
+`datasets upload <dir>` sends a LeRobot directory straight into RMS, no Hugging Face in
+between. The contract is the server's `docs/dataset-upload.md`; `dataset_upload.rs` is
+written against it and nothing else. What must stay true when touching it:
+
+- **Never hold a part in memory.** A part is hashed in one pass over the file range and
+  streamed from disk in a second (`reqwest::Body::wrap_stream`). Memory must not grow
+  with file size, `--chunk-size` or `--parallel`. `Content-Length` is set by hand — a
+  streamed body otherwise goes out chunked and the server answers 411.
+- **The server is the source of truth for resume.** The only local state is a note
+  mapping (server URL, directory) to a dataset id, under `~/.local/state/rmsctl/uploads/`
+  (`RMSCTL_STATE_DIR` overrides). Which parts are stored is always read from
+  `GET /datasets/:id/upload`. Never write into the dataset directory.
+- **Branch on `code`, never on the sentence.** `classify()` decides what is retried;
+  `UPLOAD_BUSY` waits without counting against `--retries`. Start is never re-sent after
+  a network error or a proxy's 5xx (one without a `code`): it may have created the
+  dataset. A refusal the server wrote itself created nothing and is retried.
+- **Stop sending once the server answered.** Most refusals arrive before the body is
+  read; the body stream ends itself then, or a 32 MiB part is pushed up a slow link for
+  nothing (and the progress bar overshoots).
+- **`--json` is the quiet mode.** No progress on stdout; the final `GET /datasets/:id`
+  body is the only output. Exit code 0 only for `ready`.
+- `upload-cancel` uses `POST …/upload/cancel` while an upload is open or failed, and
+  `DELETE /datasets/:id` for an uploaded dataset that failed validation (the server
+  answers 409 `UPLOAD_COMPLETED` to a cancel there).
+
+The flow tests run against a hand-written HTTP/1.1 server in
+`dataset_upload_tests.rs` (`Mock`); extend it when the contract grows rather than
+mocking at the function level — the bugs in this feature live in headers, byte ranges
+and ordering.
 
 ### Pagination honesty
 

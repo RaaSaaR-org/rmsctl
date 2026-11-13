@@ -21,6 +21,40 @@ struct ErrorBody {
     message: Option<String>,
 }
 
+/// A response the caller interprets itself: the status, the server's
+/// `Retry-After` and the untouched body.
+///
+/// The typed verbs below collapse every refusal into `RmsError::Api`, which is
+/// right for a one-shot command. The dataset upload has to branch on the
+/// server's stable `code` (retry `UPLOAD_BUSY`, list what `UPLOAD_INCOMPLETE`
+/// is missing), so it gets the whole answer.
+#[derive(Debug, Clone)]
+pub struct RawResponse {
+    pub status: u16,
+    pub retry_after: Option<u64>,
+    pub body: String,
+}
+
+impl RawResponse {
+    pub fn is_success(&self) -> bool {
+        (200..300).contains(&self.status)
+    }
+
+    /// The body as JSON; `null` when it is empty or not JSON (a proxy's HTML
+    /// error page, for one).
+    pub fn json(&self) -> Value {
+        serde_json::from_str(&self.body).unwrap_or(Value::Null)
+    }
+
+    /// The server's stable error code, e.g. `UPLOAD_BUSY`.
+    pub fn code(&self) -> Option<String> {
+        self.json()
+            .get("code")
+            .and_then(|c| c.as_str())
+            .map(String::from)
+    }
+}
+
 impl ApiClient {
     pub fn new(config: &RmsConfig) -> Self {
         Self {
@@ -32,6 +66,35 @@ impl ApiClient {
 
     fn url(&self, path: &str) -> String {
         format!("{}{}", self.base_url, path)
+    }
+
+    /// The base URL this client talks to, without a trailing slash.
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
+    /// An authenticated request the caller finishes (headers, body, timeout)
+    /// and hands to `send_raw`.
+    pub fn request(&self, method: Method, path: &str) -> reqwest::RequestBuilder {
+        self.build(method, path)
+    }
+
+    /// Send a request and return whatever the server said, refusals included.
+    /// Only a transport failure is an `Err`.
+    pub async fn send_raw(&self, req: reqwest::RequestBuilder) -> RmsResult<RawResponse> {
+        let resp = req.send().await?;
+        let status = resp.status().as_u16();
+        let retry_after = resp
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.trim().parse::<u64>().ok());
+        let body = resp.text().await?;
+        Ok(RawResponse {
+            status,
+            retry_after,
+            body,
+        })
     }
 
     fn build(&self, method: Method, path: &str) -> reqwest::RequestBuilder {

@@ -95,7 +95,7 @@ pub enum Command {
         #[command(subcommand)]
         cmd: ComplianceCommand,
     },
-    /// Browse datasets
+    /// Browse, upload and validate datasets
     Datasets {
         #[command(subcommand)]
         cmd: DatasetsCommand,
@@ -562,6 +562,58 @@ pub enum DatasetsCommand {
     },
     /// Status of a running Hub push
     PushStatus { id: String },
+    /// Upload a LeRobot dataset directory straight into RMS (no Hugging Face)
+    ///
+    /// Sends the directory file by file in bounded parts, verifies every part
+    /// by checksum, waits for the server's validation and prints the dataset.
+    /// Run the same command again to resume an interrupted upload: only the
+    /// parts the server does not hold yet are sent.
+    Upload {
+        /// Dataset root: the directory that holds meta/ and data/
+        dir: std::path::PathBuf,
+        /// Dataset name (default: the directory name)
+        #[arg(long)]
+        name: Option<String>,
+        /// Dataset description
+        #[arg(long)]
+        description: Option<String>,
+        /// Robot type ID (default: matched from meta/info.json, created if new)
+        #[arg(long, value_name = "ID")]
+        robot_type: Option<String>,
+        /// Part size: bytes, or e.g. 16M (min 5M; default and max set by the
+        /// server, 32M). Lower it on a slow uplink: one part must arrive
+        /// within the proxy's request timeout
+        #[arg(long, value_name = "SIZE", value_parser = crate::commands::dataset_upload::parse_size)]
+        chunk_size: Option<u64>,
+        /// Parts sent at once (the server streams at most 4 across all uploads)
+        #[arg(long, value_name = "N", default_value_t = 3, value_parser = clap::value_parser!(u8).range(1..=16))]
+        parallel: u8,
+        /// Attempts per part after a transient failure, with backoff
+        #[arg(long, value_name = "N", default_value_t = 8)]
+        retries: u32,
+        /// Resume this upload instead of the one remembered for the directory
+        #[arg(long, value_name = "DATASET_ID", conflicts_with = "restart")]
+        resume: Option<String>,
+        /// Discard the upload remembered for the directory and start over
+        #[arg(long)]
+        restart: bool,
+        /// Skip the whole-file SHA-256 (parts are still verified one by one)
+        #[arg(long)]
+        no_checksum: bool,
+        /// Return once every part is stored instead of waiting for validation
+        #[arg(long)]
+        no_wait: bool,
+        /// Seconds to wait for the server's verdict after the last part
+        #[arg(long, value_name = "SECS", default_value_t = 1800)]
+        wait_timeout: u64,
+        /// Seconds one part may take before it is sent again
+        #[arg(long, value_name = "SECS", default_value_t = 300)]
+        part_timeout: u64,
+    },
+    /// What the server holds of a direct upload
+    UploadStatus { id: String },
+    /// Cancel a direct upload and delete what was stored
+    UploadCancel { id: String },
     /// List flagged episodes
     Flagged { id: String },
     /// Flag one episode
