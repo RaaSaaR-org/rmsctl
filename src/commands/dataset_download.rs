@@ -1007,4 +1007,4 @@ pub async fn download(
 
 #[cfg(test)]
 #[path = "dataset_download_tests.rs"]
-mod tests;
+pub(super) mod tests;

@@ -76,6 +76,8 @@ pub struct UploadOptions {
     pub no_wait: bool,
     pub wait_timeout: Duration,
     pub part_timeout: Duration,
+    /// Which files of the directory go.
+    pub rules: ScanRules,
     /// Where the "which upload belongs to this directory" notes live. `None`
     /// resolves the platform state directory.
     pub state_dir: Option<PathBuf>,
@@ -138,11 +140,12 @@ pub fn parse_size(s: &str) -> Result<u64, String> {
     Ok((n * mult as f64).round() as u64)
 }
 
-// ── What a LeRobot tree is made of ──────────────────────────────────────
+// ── Which files of the directory go ─────────────────────────────────────
 
-/// The files the server accepts — the same rule its Hugging Face importer
-/// selects by. Anything else in the directory (README.md, .git, a stray
-/// notebook) is not declared at all.
+/// The files the server *reads* — the rule its Hugging Face importer selects
+/// by. Everything else in the directory is uploaded as well (a server before
+/// RMS TASK-500 refused to store it, see `start`); this is what
+/// `--lerobot-only` narrows the upload to.
 pub fn is_dataset_file(rel: &str) -> bool {
     if rel.starts_with("meta/") {
         return true;
@@ -156,9 +159,62 @@ pub fn is_dataset_file(rel: &str) -> bool {
     rel.starts_with("images/")
 }
 
-/// Top-level directories worth walking. `.git` or a Hub `.cache` can hold far
-/// more files than the dataset itself.
-const TREE_ROOTS: [&str; 4] = ["meta", "data", "videos", "images"];
+/// Why an entry called `name` is never dataset content, or `None`.
+///
+/// Version-control data, OS and interpreter droppings, and this tool's own
+/// unfinished downloads — at any depth. `.cache` only at the top: that is
+/// where `huggingface-cli download --local-dir` keeps its bookkeeping.
+/// `--no-default-excludes` switches these off, except the last: `datasets
+/// download` refuses to write a name ending in `.rmsctl-part`, so one that
+/// was uploaded could never come back.
+pub(super) fn junk_reason(name: &str, top_level: bool, defaults: bool) -> Option<&'static str> {
+    if name.ends_with(super::dataset_download::PART_SUFFIX) {
+        return Some("an unfinished rmsctl download");
+    }
+    if !defaults {
+        return None;
+    }
+    match name {
+        ".git" => Some("version-control data"),
+        ".DS_Store" => Some("macOS Finder metadata"),
+        "__pycache__" => Some("Python bytecode cache"),
+        ".cache" if top_level => Some("Hugging Face download cache"),
+        _ => None,
+    }
+}
+
+/// Why the server would refuse `rel` as a manifest path, or `None`. Checked
+/// here so one odd file name is named before anything is hashed or sent,
+/// instead of failing the whole start request.
+pub(super) fn unstorable_reason(rel: &str) -> Option<&'static str> {
+    if rel.len() > 1024 {
+        return Some("its path is longer than 1024 bytes");
+    }
+    if rel.chars().any(|c| c.is_control()) {
+        return Some("its name contains a control character");
+    }
+    if rel.contains('\\') {
+        return Some("its name contains a backslash");
+    }
+    let b = rel.as_bytes();
+    if b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':' {
+        return Some("its path starts like a drive letter (X:)");
+    }
+    None
+}
+
+/// What decides which files of a directory are uploaded (and, in `datasets
+/// verify`, compared).
+#[derive(Debug, Clone, Default)]
+pub struct ScanRules {
+    /// `--exclude` patterns, in `models upload`'s syntax.
+    pub exclude: Vec<String>,
+    /// Only the LeRobot tree: `meta/**`, `data/**/*.parquet`,
+    /// `videos/**/*.mp4`, `images/**`.
+    pub lerobot_only: bool,
+    /// Do not skip `.git`, `.DS_Store`, `__pycache__` and a top-level `.cache`.
+    pub no_default_excludes: bool,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct LocalFile {
@@ -168,15 +224,23 @@ pub(super) struct LocalFile {
     pub(super) size: u64,
 }
 
+/// One entry of the directory that is not uploaded, and why. Nothing is left
+/// out without an entry here.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct Skipped {
+    /// Relative path; a directory ends in `/` and stands for all it holds.
+    pub(super) rel: String,
+    pub(super) why: String,
+}
+
 #[derive(Debug, Default)]
-struct Scan {
-    files: Vec<LocalFile>,
-    /// Entries present in the directory that are not part of a LeRobot tree.
-    skipped: usize,
+pub(super) struct Scan {
+    pub(super) files: Vec<LocalFile>,
+    pub(super) skipped: Vec<Skipped>,
 }
 
 impl Scan {
-    fn total_bytes(&self) -> u64 {
+    pub(super) fn total_bytes(&self) -> u64 {
         self.files.iter().map(|f| f.size).sum()
     }
 }
@@ -185,34 +249,36 @@ pub(super) fn io_err(what: &str, path: &Path, e: std::io::Error) -> RmsError {
     RmsError::Other(format!("{what} {}: {e}", path.display()))
 }
 
-fn scan_dir(root: &Path) -> RmsResult<Scan> {
+/// Every regular file under `root` that `rules` lets through, sorted by path,
+/// plus the list of what was left out.
+pub(super) fn scan_dir(root: &Path, rules: &ScanRules) -> RmsResult<Scan> {
     let mut scan = Scan::default();
-    let entries = std::fs::read_dir(root).map_err(|e| io_err("cannot read", root, e))?;
-    for entry in entries {
-        let entry = entry.map_err(|e| io_err("cannot read", root, e))?;
-        let name = entry.file_name();
-        match name.to_str() {
-            Some(n) if TREE_ROOTS.contains(&n) && entry.path().is_dir() => {
-                walk(&entry.path(), n, 1, &mut scan)?;
-            }
-            _ => scan.skipped += 1,
-        }
-    }
+    walk(root, "", 0, rules, &mut scan)?;
     scan.files.sort_by(|a, b| a.rel.cmp(&b.rel));
+    scan.skipped.sort_by(|a, b| a.rel.cmp(&b.rel));
     Ok(scan)
 }
 
-fn walk(dir: &Path, rel: &str, depth: usize, scan: &mut Scan) -> RmsResult<()> {
-    // A LeRobot tree is four levels deep. The cap only exists to end a
-    // symlink loop.
+/// Walks `dir`; returns how many entries it holds, so the caller can tell an
+/// empty directory (which no file-by-file upload can carry) from a full one.
+fn walk(
+    dir: &Path,
+    rel: &str,
+    depth: usize,
+    rules: &ScanRules,
+    scan: &mut Scan,
+) -> RmsResult<usize> {
+    // The cap only exists to end a symlink loop.
     if depth > 32 {
         return Err(RmsError::InvalidInput(format!(
             "{} is nested more than 32 levels deep — is there a symlink loop?",
             dir.display()
         )));
     }
+    let mut entries = 0;
     for entry in std::fs::read_dir(dir).map_err(|e| io_err("cannot read", dir, e))? {
         let entry = entry.map_err(|e| io_err("cannot read", dir, e))?;
+        entries += 1;
         let path = entry.path();
         let name = entry.file_name();
         let Some(name) = name.to_str() else {
@@ -221,23 +287,97 @@ fn walk(dir: &Path, rel: &str, depth: usize, scan: &mut Scan) -> RmsResult<()> {
                 path.display()
             )));
         };
-        let child = format!("{rel}/{name}");
+        let child = if rel.is_empty() {
+            name.to_string()
+        } else {
+            format!("{rel}/{name}")
+        };
         // `metadata` follows symlinks on purpose: a Hub cache snapshot is a
-        // tree of links into `blobs/`.
-        let meta = std::fs::metadata(&path).map_err(|e| io_err("cannot stat", &path, e))?;
+        // tree of links into `blobs/`. A linked file is uploaded as the bytes
+        // it points to.
+        let meta = std::fs::metadata(&path);
+        let shown = match &meta {
+            Ok(m) if m.is_dir() => format!("{child}/"),
+            _ => child.clone(),
+        };
+        // Junk and --exclude come before the stat is looked at, so a dangling
+        // link inside `.git`, or one the user excluded, is not an error.
+        if let Some(why) = junk_reason(name, rel.is_empty(), !rules.no_default_excludes) {
+            scan.skipped.push(Skipped {
+                rel: shown,
+                why: why.to_string(),
+            });
+            continue;
+        }
+        if let Some(pattern) = rules
+            .exclude
+            .iter()
+            .find(|p| super::model_upload::excluded(p, &child))
+        {
+            scan.skipped.push(Skipped {
+                rel: shown,
+                why: format!("--exclude {pattern}"),
+            });
+            continue;
+        }
+        let meta = meta.map_err(|e| {
+            let link = std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink());
+            if link {
+                RmsError::InvalidInput(format!(
+                    "{} is a symbolic link whose target cannot be read ({e}).\n  \
+                     Fix or remove the link, or leave it out with --exclude '{child}'.",
+                    path.display()
+                ))
+            } else {
+                io_err("cannot stat", &path, e)
+            }
+        })?;
         if meta.is_dir() {
-            walk(&path, &child, depth + 1, scan)?;
-        } else if meta.is_file() && is_dataset_file(&child) {
+            if walk(&path, &child, depth + 1, rules, scan)? == 0 {
+                scan.skipped.push(Skipped {
+                    rel: shown,
+                    why: "an empty directory — only files can be stored".into(),
+                });
+            }
+        } else if !meta.is_file() {
+            scan.skipped.push(Skipped {
+                rel: shown,
+                why: "not a regular file (socket, pipe or device)".into(),
+            });
+        } else if rules.lerobot_only && !is_dataset_file(&child) {
+            scan.skipped.push(Skipped {
+                rel: shown,
+                why: "not part of the LeRobot tree (--lerobot-only)".into(),
+            });
+        } else if let Some(why) = unstorable_reason(&child) {
+            return Err(RmsError::InvalidInput(format!(
+                "{} cannot be stored: {why}.\n  \
+                 Rename it, or leave it out with --exclude.",
+                path.display()
+            )));
+        } else {
             scan.files.push(LocalFile {
                 rel: child,
                 abs: path,
                 size: meta.len(),
             });
-        } else {
-            scan.skipped += 1;
         }
     }
-    Ok(())
+    Ok(entries)
+}
+
+/// The left-out entries as lines for the terminal: all of them, or the first
+/// `limit` and a count of the rest.
+pub(super) fn skipped_lines(skipped: &[Skipped], limit: usize) -> Vec<String> {
+    let mut lines: Vec<String> = skipped
+        .iter()
+        .take(limit)
+        .map(|s| format!("{}  ({})", s.rel, s.why))
+        .collect();
+    if skipped.len() > limit {
+        lines.push(format!("… and {} more", skipped.len() - limit));
+    }
+    lines
 }
 
 fn read_info(root: &Path) -> RmsResult<Value> {
@@ -769,6 +909,17 @@ pub(super) fn build_plan(
         files,
         total_bytes,
     })
+}
+
+/// The local files an upload's file list (fixed when it started) does not
+/// name — they are not on the instance, whatever the upload's state says.
+pub(super) fn not_declared<'a>(local: &'a [LocalFile], remote: &[RemoteFile]) -> Vec<&'a str> {
+    let declared: HashSet<&str> = remote.iter().map(|r| r.path.as_str()).collect();
+    local
+        .iter()
+        .map(|l| l.rel.as_str())
+        .filter(|rel| !declared.contains(rel))
+        .collect()
 }
 
 fn changed(what: String) -> RmsError {
@@ -1312,10 +1463,10 @@ pub async fn upload(
         )));
     }
     let info = read_info(&root)?;
-    let scan = scan_dir(&root)?;
+    let scan = scan_dir(&root, &opts.rules)?;
     if scan.files.is_empty() {
         return Err(RmsError::InvalidInput(format!(
-            "{} holds no LeRobot files",
+            "{} holds no files to upload",
             root.display()
         )));
     }
@@ -1352,21 +1503,58 @@ pub async fn upload(
         output::field("Source", &root.display().to_string());
         output::field("Server", client.base_url());
         output::field("Format", &describe_info(&info));
-        let skipped = match scan.skipped {
-            0 => String::new(),
-            n => format!(
-                " — {n} other entr{} left out",
-                if n == 1 { "y" } else { "ies" }
-            ),
-        };
+        let beside = scan
+            .files
+            .iter()
+            .filter(|f| !is_dataset_file(&f.rel))
+            .count();
         output::field(
             "Files",
             &format!(
-                "{} ({}){skipped}",
+                "{} ({}){}",
                 scan.files.len(),
-                human_bytes(scan.total_bytes())
+                human_bytes(scan.total_bytes()),
+                match (opts.rules.lerobot_only, beside) {
+                    (true, _) => " — the LeRobot tree only (--lerobot-only)".to_string(),
+                    (false, 0) => " — everything in the directory".to_string(),
+                    (false, n) =>
+                        format!(" — everything in the directory, {n} beside the LeRobot tree"),
+                }
             ),
         );
+        // Nothing is dropped silently: the dry run names every entry that
+        // stays behind; a run that sends shows the first few and the count.
+        if !scan.skipped.is_empty() {
+            let limit = if ctx.yes { 12 } else { usize::MAX };
+            output::field(
+                "Left out",
+                &format!(
+                    "{} entr{} — NOT uploaded:",
+                    scan.skipped.len(),
+                    if scan.skipped.len() == 1 { "y" } else { "ies" }
+                ),
+            );
+            for line in skipped_lines(&scan.skipped, limit) {
+                println!("      {} {line}", "-".bright_black());
+            }
+            if ctx.yes && scan.skipped.len() > limit {
+                output::info("Run without --yes to list every left-out entry.");
+            }
+        }
+    }
+
+    // --json keeps stdout for the result; what stays behind still has to be
+    // said, so it goes to stderr.
+    if ui.quiet && !scan.skipped.is_empty() {
+        eprintln!(
+            "rmsctl: {} entr{} of {} NOT uploaded:",
+            scan.skipped.len(),
+            if scan.skipped.len() == 1 { "y" } else { "ies" },
+            root.display()
+        );
+        for line in skipped_lines(&scan.skipped, usize::MAX) {
+            eprintln!("rmsctl:   {line}");
+        }
     }
 
     // ── Is there an upload to carry on with? ────────────────────────────
@@ -1449,6 +1637,34 @@ pub async fn upload(
             "processing" | "completed" => {
                 ui.field("Resuming", &id);
                 ui.info("Every part is already stored; waiting for the server's verdict.");
+                // That upload's file list was fixed when it started — possibly
+                // by an older rmsctl that sent only the LeRobot tree. A file
+                // that is here now and was not declared then is not on the
+                // instance, and "ready" below must not read as if it were.
+                let absent = not_declared(&scan.files, &status.files);
+                if !absent.is_empty() {
+                    let message = format!(
+                        "{} file(s) of this directory are NOT part of upload {id} and are not on the instance: {}{}.\n      \
+                         Check with: rmsctl datasets verify {id} {}",
+                        absent.len(),
+                        absent
+                            .iter()
+                            .take(8)
+                            .copied()
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                        match absent.len().saturating_sub(8) {
+                            0 => String::new(),
+                            n => format!(" and {n} more"),
+                        },
+                        root.display()
+                    );
+                    if ui.quiet {
+                        eprintln!("rmsctl: {message}");
+                    } else {
+                        ui.warn(&message);
+                    }
+                }
                 let _ = ACTIVE_UPLOAD.set(id.clone());
                 return conclude(client, ctx, &ui, opts, &store, &id, 0, 0).await;
             }
@@ -1700,10 +1916,51 @@ async fn start(
     }
     let started: StartResponse = parse(&r)?;
 
+    // A server before RMS TASK-500 stores only the LeRobot tree and answers
+    // with the declared files it will leave out. Carrying on would end in a
+    // "ready" dataset that silently lacks them — the one thing this command
+    // must not do — so the upload it just opened is cancelled again.
+    if !started.ignored.is_empty() {
+        let cancelled = control(
+            client,
+            Method::POST,
+            &format!("/datasets/{}/upload/cancel", started.dataset_id),
+            None,
+            true,
+            &opts.tuning,
+        )
+        .await
+        .is_ok_and(|r| r.is_success() || r.status == 404);
+        let mut paths: Vec<&str> = started.ignored.iter().map(|i| i.path.as_str()).collect();
+        paths.sort();
+        let shown = paths.iter().take(8).copied().collect::<Vec<_>>().join(", ");
+        let more = match paths.len().saturating_sub(8) {
+            0 => String::new(),
+            n => format!(" and {n} more"),
+        };
+        return Err(RmsError::Other(format!(
+            "this server stores only the LeRobot tree (meta/, data/**/*.parquet, videos/**/*.mp4, images/) \
+             and would leave out {} file(s): {shown}{more}.\n  \
+             It is older than the release that stores every file of a dataset directory. {}\n  \
+             Either update the server, or upload only the LeRobot tree with --lerobot-only — \
+             the files named above are then NOT on the instance, so keep them before deleting the directory.",
+            paths.len(),
+            if cancelled {
+                "Nothing was uploaded; the upload that was opened has been cancelled.".to_string()
+            } else {
+                format!(
+                    "Nothing was uploaded, but the opened upload could not be cancelled — remove it with: \
+                     rmsctl datasets upload-cancel {} --yes",
+                    started.dataset_id
+                )
+            }
+        )));
+    }
+
     // Noted before the first byte goes out, so an upload killed a second
     // later is still found again.
     let noted = store.save(&started.dataset_id, name);
-    let ignored: HashSet<String> = started.ignored.iter().map(|i| i.path.clone()).collect();
+    let ignored: HashSet<String> = HashSet::new();
     let plan = build_plan(&scan.files, &started.files, &ignored, started.chunk_size)?;
 
     ui.success(&format!(

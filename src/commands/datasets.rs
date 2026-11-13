@@ -1,5 +1,6 @@
 use super::dataset_download;
 use super::dataset_upload;
+use super::dataset_verify;
 use crate::cli::DatasetsCommand;
 use crate::client::ApiClient;
 use crate::ctx::Ctx;
@@ -27,6 +28,9 @@ pub async fn run(cmd: &DatasetsCommand, client: &ApiClient, ctx: &Ctx) -> RmsRes
         DatasetsCommand::PushStatus { id } => push_status(client, ctx, id).await,
         DatasetsCommand::Upload {
             dir,
+            exclude,
+            lerobot_only,
+            no_default_excludes,
             name,
             description,
             robot_type,
@@ -54,6 +58,11 @@ pub async fn run(cmd: &DatasetsCommand, client: &ApiClient, ctx: &Ctx) -> RmsRes
                 no_wait: *no_wait,
                 wait_timeout: Duration::from_secs(*wait_timeout),
                 part_timeout: Duration::from_secs((*part_timeout).max(1)),
+                rules: dataset_upload::ScanRules {
+                    exclude: exclude.clone(),
+                    lerobot_only: *lerobot_only,
+                    no_default_excludes: *no_default_excludes,
+                },
                 state_dir: None,
                 tuning: dataset_upload::Tuning::default(),
             };
@@ -82,6 +91,31 @@ pub async fn run(cmd: &DatasetsCommand, client: &ApiClient, ctx: &Ctx) -> RmsRes
                 tuning: dataset_upload::Tuning::default(),
             };
             dataset_download::run_download(client, ctx, opts).await
+        }
+        DatasetsCommand::Verify {
+            id,
+            dir,
+            exclude,
+            lerobot_only,
+            no_default_excludes,
+            no_checksum,
+            require_checksum,
+            parallel,
+        } => {
+            let opts = dataset_verify::VerifyOptions {
+                id: id.clone(),
+                dir: dir.clone(),
+                rules: dataset_upload::ScanRules {
+                    exclude: exclude.clone(),
+                    lerobot_only: *lerobot_only,
+                    no_default_excludes: *no_default_excludes,
+                },
+                no_checksum: *no_checksum,
+                require_checksum: *require_checksum,
+                parallel: *parallel as usize,
+                tuning: dataset_upload::Tuning::default(),
+            };
+            dataset_verify::run_verify(client, ctx, opts).await
         }
         DatasetsCommand::UploadStatus { id } => dataset_upload::status(client, ctx, id).await,
         DatasetsCommand::UploadCancel { id } => dataset_upload::cancel(client, ctx, id, None).await,

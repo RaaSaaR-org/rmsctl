@@ -3,6 +3,7 @@ pub mod approvals;
 pub mod compliance;
 pub mod dataset_download;
 pub mod dataset_upload;
+pub mod dataset_verify;
 pub mod datasets;
 pub mod deployments;
 pub mod embodiments;

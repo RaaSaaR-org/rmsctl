@@ -79,6 +79,8 @@ src/
     dataset_upload.rs        # datasets upload | upload-status | upload-cancel (direct upload)
     dataset_upload_tests.rs  # its tests, incl. a mock server that speaks the upload contract
     dataset_download.rs      # datasets download — and models download (Kind::Model)
+    dataset_verify.rs        # datasets verify — a local directory against the instance's file list
+    dataset_verify_tests.rs  # its tests, on the download tests' mock server
     dataset_download_tests.rs # its tests, incl. a mock server that speaks the download contract
     training.rs    # list, show, active, queue, workers, start, cancel, retry, export, estimate
     models.rs      # list, show, lineage, compare, delete — and the dispatch of upload/files/download
@@ -126,6 +128,26 @@ are never gated.
 between. The contract is the server's `docs/dataset-upload.md`; `dataset_upload.rs` is
 written against it and nothing else. What must stay true when touching it:
 
+- **Every regular file of the directory goes, and nothing is left out silently.** The
+  purpose of upload + download is "push a dataset, delete the local copy, fetch it back
+  later", so `scan_dir` takes everything and records each entry it passes over in
+  `Scan.skipped` with a reason: the built-in junk (`junk_reason`: `.git`, `.DS_Store`,
+  `__pycache__`, a top-level `.cache`, `*.rmsctl-part`), `--exclude` (the matcher is
+  `model_upload::excluded`), empty directories, non-regular files, and with
+  `--lerobot-only` everything beside the tree. Symlinks are followed; a dangling one is
+  an error. The run without `--yes` prints the whole list. A new skip rule needs a
+  reason string and a line in the README table.
+- **A server that would drop files is refused.** A server before RMS TASK-500 answers
+  the start request with the declared files it will not store (`ignored`). `start`
+  then cancels the upload it just opened and fails naming them; `--lerobot-only` is
+  the way to upload to such a server knowingly. Never carry on past a non-empty
+  `ignored`.
+- **`datasets verify` reads the directory by the same `ScanRules`** and compares it
+  with `GET /datasets/:id/files` (path, size, SHA-256 where listed) without fetching a
+  file. Any difference, in either direction, is a non-zero exit: it gates an `rm -rf`.
+  A dataset that is not `ready` is a non-zero exit as well, files matching or not.
+- **Nothing is left out silently, in any output mode.** Human output lists the
+  left-out entries under `Left out`; `--json` prints the same list on stderr.
 - **Never hold a part in memory.** A part is hashed in one pass over the file range and
   streamed from disk in a second (`reqwest::Body::wrap_stream`). Memory must not grow
   with file size, `--chunk-size` or `--parallel`. `Content-Length` is set by hand — a
