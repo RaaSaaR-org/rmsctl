@@ -313,10 +313,16 @@ braucht deshalb kein `--yes`.
 ### Modelle & Deployment
 
 ```bash
-rmsctl models list                               # Modell-Versionen
+rmsctl models list                               # Modell-Versionen (mit Basis, Quelle, Groesse)
 rmsctl models show <id>                          # Version + Evaluierungs-Rollup
 rmsctl models lineage <id>                       # Herkunft einer Version
 rmsctl models compare <idA> <idB> [--metrics loss,acc]  # Metriken vergleichen
+rmsctl models upload <dir> --version X [--name N]  # Checkpoint-Verzeichnis direkt hochladen und registrieren
+rmsctl models upload-status [<id>]               # Ein Upload im Detail; ohne ID: alle offenen Uploads
+rmsctl models upload-cancel <id>                 # Upload abbrechen, Gespeichertes loeschen
+rmsctl models files <id>                         # Dateien, die die Instanz zu einem Modell speichert
+rmsctl models download <id> [--out dir] [--resume]  # Modell herunterladen (prueft Groesse + SHA-256)
+rmsctl models delete <id>                        # Archivieren; bei hochgeladenen Modellen auch die Dateien loeschen
 
 rmsctl deployments list [--active]               # Deployments auflisten
 rmsctl deployments show <id> | metrics <id>      # Details & Metriken
@@ -330,6 +336,99 @@ rmsctl updates approve <id> --approver-id X
 rmsctl updates deploy <id> <robot-id>
 rmsctl updates rollback <id> <robot-id> --target-version X
 ```
+
+#### Modell-Checkpoint direkt hochladen
+
+`rmsctl models upload` schickt ein trainiertes Checkpoint-Verzeichnis vom eigenen Rechner
+direkt in den Modellspeicher einer RMS-Instanz und traegt es in die Model Registry ein —
+ohne Hugging Face, ohne externe URL. Der Vertrag ist `docs/model-upload.md` im Server-Repo;
+die Teil-Uebertragung ist dieselbe wie beim Datensatz-Upload.
+
+```bash
+# 1. Ansehen, was passieren wuerde (sendet nichts)
+rmsctl --server https://neodem.example/api models upload /data/runs/pipe_g11 --version g11-step-5000
+
+# 2. Hochladen, auf die Registrierung warten, Modell ausgeben
+rmsctl --server https://neodem.example/api models upload /data/runs/pipe_g11 \
+  --name "GR00T N1.7 AppleToPlate g11" --version g11-step-5000 \
+  --base-model groot_n1_7 --dataset 9b7c63ca-fc76-4dd1-aed2-2dada9bdcb64 \
+  --metrics final_loss=0.0264 --metrics steps=5000 \
+  --eval-metrics success_rate=0.52 --eval-metrics eval_episodes=50 \
+  --notes "5000 steps, lr 1e-4, batch 128, seed 42" --yes
+```
+
+```
+  ◈ Upload model: GR00T N1.7 AppleToPlate g11 g11-step-5000
+    │ Source         /data/runs/pipe_g11
+    │ Base model     groot_n1_7
+    │ Files          15 (6.9 GB)
+    │                5.0 GB  model-00001-of-00002.safetensors
+    │                1.9 GB  model-00002-of-00002.safetensors
+  [--] Hashing 15 file(s), 6.9 GB, so the server can verify what it stored …
+  [OK] Upload started: fe89db46-… (rustfs store, 32 MiB parts, 220 part(s))
+    │ Uploading      ████████░░░░░░░░░░░░  41.2%  2.8 GB / 6.9 GB · 9/15 files · 90.3 MB/s · ETA 45s
+  [OK] Sent 6.9 GB in 1m17s (90.3 MB/s)
+  [--] The server is assembling the files and verifying checksums …
+  [OK] Model registered
+    │ ID             fe89db46-d44b-4edc-8794-cfe95facb611
+    │ Source         uploaded directly
+    │ Artifact       s3://production-models/uploads/fe89db46-…/
+    │ Base model     groot_n1_7
+    │ Trained on     NVIDIA AppleToPlate (9b7c63ca-…)
+    │ Stored         6.9 GB in 15 file(s)
+```
+
+`<dir>` ist das Checkpoint-Verzeichnis (mit `config.json` und den Gewichten). Gesendet wird
+**jede** Datei darin, mit Unterverzeichnissen — ein Checkpoint hat kein festes Layout.
+`--exclude` laesst Dateien weg.
+
+| Flag | Bedeutung |
+| --- | --- |
+| `--version <v>` | Pflicht: Version des Modells, z. B. `1.0.0` oder `g11-step-5000` |
+| `--name` | Name (Default: Verzeichnisname). Name + Version duerfen noch nicht registriert sein |
+| `--model-type` | `vla` (Default) oder `rl_policy` |
+| `--base-model` | Foundation-Modell: `pi0`, `pi0_6`, `openvla`, `groot`, `groot_n1_7`, `smolvla` |
+| `--dataset <id>` | Datensatz, auf dem trainiert wurde; muss auf der Instanz existieren |
+| `--metrics k=v \| datei.json` | Trainingsmetriken; wiederholbar. Zahlen bleiben Zahlen, eine JSON-Datei muss ein Objekt enthalten |
+| `--eval-metrics k=v \| datei.json` | Evaluierungsmetriken, gleiche Formen (z. B. `success_rate=0.52`) |
+| `--notes <text>` | Freitext zum Modell (Rezept, Seed, wo evaluiert) |
+| `--exclude <glob>` | Dateien weglassen, wiederholbar: `*.log`, `wandb`, `checkpoint-*/optimizer.pt`, `**/tmp` |
+| `--chunk-size`, `--parallel`, `--retries`, `--resume`, `--restart`, `--no-checksum`, `--no-wait`, `--part-timeout` | Wie bei `datasets upload` |
+| `--wait-timeout` | Sekunden fuer Zusammensetzen, Pruefen und Registrieren (Default 3600) |
+
+- **Erst am Ende ein Modell:** Solange der Upload laeuft, fehlgeschlagen oder abgebrochen
+  ist, steht nichts in der Registry. `rmsctl models upload-status` (ohne ID) zeigt die
+  offenen Uploads. Nach dem Registrieren traegt das Modell die ID des Uploads.
+- **Fortsetzen / Abbrechen:** wie beim Datensatz — denselben Befehl noch einmal ausfuehren
+  bzw. `rmsctl models upload-cancel <id> --yes`. Ein registriertes Modell wird nicht
+  abgebrochen, sondern mit `rmsctl models delete <id> --yes` archiviert; dabei loescht die
+  Instanz die gespeicherten Dateien.
+- **Grosse Dateien:** Eine 5-GB-Datei sind 149 Teile zu 32 MiB; das Limit liegt bei 10 000
+  Teilen pro Datei. Gemessen lokal (Server + RustFS auf demselben Rechner, Quelle auf einer
+  Festplatte): 6,9 GB in 15 Dateien in 173 s — 88 s Hashen, 78 s Senden (89 MB/s, begrenzt
+  durch die Quellplatte, die zweimal gelesen wird), 6 s serverseitiges Zusammensetzen und
+  SHA-256-Pruefung. `--no-checksum` spart den Hash-Durchlauf (die Teile bleiben einzeln
+  geprueft). Der Download derselben 6,9 GB dauerte 9 s inklusive SHA-256-Vergleich.
+- **Exit-Code:** 0 nur, wenn das Modell registriert ist; Ctrl-C endet mit 130.
+- **`--json`:** keine Fortschrittsanzeige; am Ende steht der unveraenderte
+  `GET /models/versions/<id>`-Payload auf stdout.
+
+#### Modell herunterladen
+
+```bash
+rmsctl models files <id>                         # Was gespeichert ist
+rmsctl models download <id> --out ./g11          # Alles holen
+rmsctl models download <id> --out ./g11 --resume # Nach einem Abbruch fortsetzen
+```
+
+`models download` ist derselbe Mechanismus wie `datasets download` (gleiche Flags:
+`--out`, `--parallel`, `--retries`, `--resume`, `--force`, `--no-checksum`,
+`--stall-timeout`), nur gegen die Modell-Routen. Dateien entstehen als
+`<name>.rmsctl-part` und bekommen ihren Namen erst, wenn Groesse und SHA-256 stimmen —
+der SHA-256 liegt fuer jedes mit `rmsctl models upload` hochgeladene Modell vor (ausser
+bei `--no-checksum`). Ohne `--out` heisst das Zielverzeichnis `./<name>-<version>`. Nur
+Modelle, die direkt hochgeladen wurden, haben Dateien auf der Instanz; alle anderen
+antworten `404 NO_STORED_FILES`.
 
 ### Skills, Embodiments & Prozesse
 

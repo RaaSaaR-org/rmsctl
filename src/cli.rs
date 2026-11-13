@@ -690,6 +690,8 @@ pub enum TrainingCommand {
 
 // ── Models ──────────────────────────────────────────────────────────────
 
+// Parsed once per run and matched at once: the size of `Upload` costs nothing.
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 pub enum ModelsCommand {
     /// List model versions
@@ -706,6 +708,113 @@ pub enum ModelsCommand {
         #[arg(long)]
         metrics: Option<String>,
     },
+    /// Upload a trained checkpoint directory straight into RMS and register it
+    ///
+    /// Sends every file of the directory in bounded parts, verifies every part
+    /// by checksum, and waits until the server has registered the model. Run
+    /// the same command again to resume an interrupted upload: only the parts
+    /// the server does not hold yet are sent.
+    Upload {
+        /// Checkpoint directory: the one holding config.json and the weights
+        dir: std::path::PathBuf,
+        /// Model name (default: the directory name)
+        #[arg(long)]
+        name: Option<String>,
+        /// Version of this model, e.g. 1.0.0 or step-5000
+        #[arg(long = "version", alias = "model-version", value_name = "VERSION")]
+        model_version: String,
+        /// Kind of model: vla (default) or rl_policy
+        #[arg(long, value_name = "TYPE")]
+        model_type: Option<String>,
+        /// The foundation model it was fine-tuned from: pi0, pi0_6, openvla,
+        /// groot, groot_n1_7 or smolvla
+        #[arg(long, value_name = "MODEL")]
+        base_model: Option<String>,
+        /// ID of the dataset it was trained on (must exist on the instance)
+        #[arg(long, value_name = "ID")]
+        dataset: Option<String>,
+        /// Training metrics: key=value, or a JSON file holding an object (repeatable)
+        #[arg(long, value_name = "K=V|FILE")]
+        metrics: Vec<String>,
+        /// Evaluation metrics, same forms, e.g. success_rate=0.52 (repeatable)
+        #[arg(long, value_name = "K=V|FILE")]
+        eval_metrics: Vec<String>,
+        /// Free text shown with the model: recipe, seed, where it was evaluated
+        #[arg(long)]
+        notes: Option<String>,
+        /// Leave files out: *.log, wandb, checkpoint-*/optimizer.pt (repeatable)
+        #[arg(long, value_name = "GLOB")]
+        exclude: Vec<String>,
+        /// Part size: bytes, or e.g. 16M (min 5M; default and max set by the
+        /// server, 32M). Lower it on a slow uplink
+        #[arg(long, value_name = "SIZE", value_parser = crate::commands::dataset_upload::parse_size)]
+        chunk_size: Option<u64>,
+        /// Parts sent at once (the server streams at most 4 across all uploads)
+        #[arg(long, value_name = "N", default_value_t = 3, value_parser = clap::value_parser!(u8).range(1..=16))]
+        parallel: u8,
+        /// Attempts per part after a transient failure, with backoff
+        #[arg(long, value_name = "N", default_value_t = 8)]
+        retries: u32,
+        /// Resume this upload instead of the one remembered for the directory
+        #[arg(long, value_name = "UPLOAD_ID", conflicts_with = "restart")]
+        resume: Option<String>,
+        /// Discard the upload remembered for the directory and start over
+        #[arg(long)]
+        restart: bool,
+        /// Skip the whole-file SHA-256 (parts are still verified one by one)
+        #[arg(long)]
+        no_checksum: bool,
+        /// Return once every part is stored instead of waiting for the registration
+        #[arg(long)]
+        no_wait: bool,
+        /// Seconds to wait for the server to assemble, verify and register
+        #[arg(long, value_name = "SECS", default_value_t = 3600)]
+        wait_timeout: u64,
+        /// Seconds one part may take before it is sent again
+        #[arg(long, value_name = "SECS", default_value_t = 300)]
+        part_timeout: u64,
+    },
+    /// What the server holds of a model upload; without an ID, every open upload
+    UploadStatus { id: Option<String> },
+    /// Cancel a model upload and delete what was stored
+    UploadCancel { id: String },
+    /// List the files the instance stores for a model
+    Files { id: String },
+    /// Download an uploaded model's files as the directory they were stored as
+    ///
+    /// Same relative paths, same bytes, straight from the instance's storage.
+    /// Every file is checked against the size the server lists, and against
+    /// its SHA-256 where the upload declared one (rmsctl does). Unfinished
+    /// files end in .rmsctl-part; --resume continues them.
+    Download {
+        /// Model version ID
+        id: String,
+        /// Directory to write the model into (default: ./<name>-<version>)
+        #[arg(long, short = 'o', value_name = "DIR")]
+        out: Option<std::path::PathBuf>,
+        /// Files fetched at once
+        #[arg(long, value_name = "N", default_value_t = 4, value_parser = clap::value_parser!(u8).range(1..=16))]
+        parallel: u8,
+        /// Attempts per file after a transient failure, with backoff
+        #[arg(long, value_name = "N", default_value_t = 8)]
+        retries: u32,
+        /// Continue in a non-empty directory: keep files that are complete,
+        /// continue partial ones where they stopped
+        #[arg(long, conflicts_with = "force")]
+        resume: bool,
+        /// Write into a non-empty directory and fetch every file again
+        #[arg(long)]
+        force: bool,
+        /// Verify sizes only, even where the server lists a SHA-256
+        #[arg(long)]
+        no_checksum: bool,
+        /// Seconds a request may deliver nothing before it is tried again
+        #[arg(long, value_name = "SECS", default_value_t = 60)]
+        stall_timeout: u64,
+    },
+    /// Archive a model version; a model uploaded to the instance also has its
+    /// stored files removed
+    Delete { id: String },
 }
 
 // ── Deployments ─────────────────────────────────────────────────────────

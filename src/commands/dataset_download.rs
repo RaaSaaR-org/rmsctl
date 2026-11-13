@@ -58,9 +58,65 @@ const MANIFEST_PAGE: u32 = 1000;
 /// not a download either.
 const MAX_RESUMPTIONS: u32 = 1000;
 
+// ── What is downloaded ──────────────────────────────────────────────────
+
+/// A dataset, or a model that was uploaded to the instance (`models
+/// download`). The server hands both out the same way — a paged file list and
+/// `files/content?path=` with `Range` (docs/dataset-download.md,
+/// docs/model-upload.md) — so they differ only in where the routes hang and
+/// in what the thing is called.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Kind {
+    Dataset,
+    Model,
+}
+
+impl Kind {
+    /// The word for it in a sentence.
+    fn noun(self) -> &'static str {
+        match self {
+            Kind::Dataset => "dataset",
+            Kind::Model => "model",
+        }
+    }
+
+    /// The command group, for the hints that name a command.
+    fn group(self) -> &'static str {
+        match self {
+            Kind::Dataset => "datasets",
+            Kind::Model => "models",
+        }
+    }
+
+    /// The path of the thing itself; its files are at `<base>/files`.
+    fn base(self, id: &str) -> String {
+        match self {
+            Kind::Dataset => format!("/datasets/{id}"),
+            Kind::Model => format!("/models/versions/{id}"),
+        }
+    }
+
+    /// The key the detail route wraps its row in.
+    fn envelope(self) -> &'static str {
+        match self {
+            Kind::Dataset => "dataset",
+            Kind::Model => "modelVersion",
+        }
+    }
+
+    /// The key of the id in the `--json` summary.
+    fn id_key(self) -> &'static str {
+        match self {
+            Kind::Dataset => "datasetId",
+            Kind::Model => "modelVersionId",
+        }
+    }
+}
+
 // ── Options ─────────────────────────────────────────────────────────────
 
 pub struct DownloadOptions {
+    pub kind: Kind,
     pub id: String,
     /// Where the dataset directory goes. `None`: `./<dataset name>`.
     pub out: Option<PathBuf>,
@@ -80,6 +136,7 @@ pub struct DownloadOptions {
 /// and what `--json` prints.
 #[derive(Debug)]
 pub struct DownloadOutcome {
+    /// The id of what was downloaded — a dataset's, or a model version's.
     pub dataset_id: String,
     pub out: PathBuf,
     pub files: usize,
@@ -95,14 +152,14 @@ pub struct DownloadOutcome {
 // ── Server shapes ───────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize)]
-struct RemoteEntry {
-    path: String,
+pub(super) struct RemoteEntry {
+    pub(super) path: String,
     #[serde(default)]
-    size: u64,
+    pub(super) size: u64,
     #[serde(default)]
     etag: Option<String>,
     #[serde(default)]
-    sha256: Option<String>,
+    pub(super) sha256: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -214,18 +271,24 @@ fn file_len(path: &Path) -> Option<u64> {
 
 // ── Manifest ────────────────────────────────────────────────────────────
 
-struct Manifest {
-    files: Vec<RemoteEntry>,
-    storage: Option<String>,
+pub(super) struct Manifest {
+    pub(super) files: Vec<RemoteEntry>,
+    pub(super) storage: Option<String>,
 }
 
-async fn fetch_manifest(client: &ApiClient, id: &str, tuning: &Tuning) -> RmsResult<Manifest> {
+pub(super) async fn fetch_manifest(
+    client: &ApiClient,
+    kind: Kind,
+    id: &str,
+    tuning: &Tuning,
+) -> RmsResult<Manifest> {
+    let base = kind.base(id);
     let mut files: Vec<RemoteEntry> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
     let mut storage = None;
     let mut after: Option<String> = None;
     loop {
-        let mut path = format!("/datasets/{id}/files?limit={MANIFEST_PAGE}");
+        let mut path = format!("{base}/files?limit={MANIFEST_PAGE}");
         if let Some(cursor) = &after {
             path.push_str("&after=");
             path.push_str(&encode_query(cursor));
@@ -234,9 +297,12 @@ async fn fetch_manifest(client: &ApiClient, id: &str, tuning: &Tuning) -> RmsRes
         if r.status == 404 && r.code().is_none() {
             return Err(RmsError::Api {
                 status: 404,
-                message: "this server has no dataset download API (GET /datasets/:id/files) — \
-                          it is older than the release that added it"
-                    .into(),
+                message: format!(
+                    "this server has no {} download API (GET {}/files) — \
+                     it is older than the release that added it",
+                    kind.noun(),
+                    kind.base(":id")
+                ),
             });
         }
         if !r.is_success() {
@@ -371,7 +437,7 @@ impl Failure {
 
 fn changed(path: &str, what: String) -> Failure {
     Failure::fatal(format!(
-        "{path}: {what} — the dataset changed on the server since its file list was read. Run the download again."
+        "{path}: {what} — it changed on the server since the file list was read. Run the download again."
     ))
 }
 
@@ -383,7 +449,10 @@ async fn attempt(job: &Job<'_>, part: &Path, mut offset: u64) -> Result<(), Fail
     let stall = job.opts.stall_timeout;
     let mut req = job
         .client
-        .request(Method::GET, &format!("/datasets/{}/files/content", job.id))
+        .request(
+            Method::GET,
+            &format!("{}/files/content", job.opts.kind.base(job.id)),
+        )
         .query(&[("path", entry.path.as_str())]);
     if offset > 0 {
         req = req.header(reqwest::header::RANGE, format!("bytes={offset}-"));
@@ -617,7 +686,7 @@ async fn fetch_file(job: &Job<'_>) -> RmsResult<()> {
 // ── download ────────────────────────────────────────────────────────────
 
 /// The directory of the download in flight, for the Ctrl-C message.
-static ACTIVE_DOWNLOAD: OnceLock<(String, PathBuf)> = OnceLock::new();
+static ACTIVE_DOWNLOAD: OnceLock<(Kind, String, PathBuf)> = OnceLock::new();
 
 /// Entry point for `datasets download`: runs it and turns Ctrl-C into an exit
 /// that says how to carry on.
@@ -629,10 +698,11 @@ pub async fn run_download(client: &ApiClient, ctx: &Ctx, opts: DownloadOptions) 
                 println!();
                 println!();
                 match ACTIVE_DOWNLOAD.get() {
-                    Some((id, out)) => {
+                    Some((kind, id, out)) => {
                         output::warn("Interrupted. What arrived is kept; unfinished files end in .rmsctl-part.");
                         output::info(&format!(
-                            "Resume: rmsctl datasets download {id} --out {} --resume",
+                            "Resume: rmsctl {} download {id} --out {} --resume",
+                            kind.group(),
                             out.display()
                         ));
                     }
@@ -653,34 +723,32 @@ pub async fn download(
     let ui = Ui::new(ctx.json);
     let tuning = &opts.tuning;
     let id = opts.id.as_str();
+    let kind = opts.kind;
+    let noun = kind.noun();
 
-    // The dataset itself: its name is the default directory, and a wrong id
-    // should read "not found", not "no files".
-    let r = control(
-        client,
-        Method::GET,
-        &format!("/datasets/{id}"),
-        None,
-        true,
-        tuning,
-    )
-    .await?;
+    // The dataset (or model) itself: its name is the default directory, and a
+    // wrong id should read "not found", not "no files".
+    let r = control(client, Method::GET, &kind.base(id), None, true, tuning).await?;
     if !r.is_success() {
         return Err(api_error(&r));
     }
-    // `{ dataset: {…} }`; a bare object is read too.
+    // `{ dataset: {…} }` / `{ modelVersion: {…} }`; a bare object is read too.
     let body = r.json();
-    let dataset = body.get("dataset").unwrap_or(&body);
-    let name = dataset
-        .get("name")
-        .and_then(Value::as_str)
-        .unwrap_or(id)
-        .to_string();
-    let status = dataset
-        .get("status")
-        .and_then(Value::as_str)
-        .unwrap_or("-")
-        .to_string();
+    let dataset = body.get(kind.envelope()).unwrap_or(&body);
+    let text = |key: &str| dataset.get(key).and_then(Value::as_str);
+    let name = match (kind, text("name"), text("version")) {
+        // A model is a name and a version; two versions must not share a directory.
+        (Kind::Model, Some(name), Some(version)) => format!("{name} {version}"),
+        (Kind::Model, None, Some(version)) => version.to_string(),
+        (_, Some(name), _) => name.to_string(),
+        _ => id.to_string(),
+    };
+    let status = text(match kind {
+        Kind::Dataset => "status",
+        Kind::Model => "deploymentStatus",
+    })
+    .unwrap_or("-")
+    .to_string();
 
     let out = opts
         .out
@@ -695,17 +763,17 @@ pub async fn download(
     let fresh = dir_is_empty(&out)?;
     if !fresh && !opts.resume && !opts.force {
         return Err(RmsError::InvalidInput(format!(
-            "{} is not empty.\n  Continue an earlier download of this dataset with --resume \
+            "{} is not empty.\n  Continue an earlier download of this {noun} with --resume \
              (keeps complete files, continues partial ones),\n  fetch everything again over it \
              with --force, or pick another directory with --out.",
             out.display()
         )));
     }
 
-    let manifest = fetch_manifest(client, id, tuning).await?;
+    let manifest = fetch_manifest(client, kind, id, tuning).await?;
     if manifest.files.is_empty() {
         return Err(RmsError::Other(format!(
-            "the server lists no files for dataset {id}"
+            "the server lists no files for {noun} {id}"
         )));
     }
     // Check every path before the first byte is written.
@@ -749,7 +817,13 @@ pub async fn download(
         output::section("◈", &format!("Download: {name}"));
         println!();
     }
-    ui.field("Dataset", id);
+    ui.field(
+        match kind {
+            Kind::Dataset => "Dataset",
+            Kind::Model => "Model version",
+        },
+        id,
+    );
     ui.field("Status", &status);
     ui.field("Into", &out.display().to_string());
     ui.field(
@@ -788,7 +862,8 @@ pub async fn download(
             ),
         );
     }
-    if status != "ready" {
+    // A model's status is its place on the deployment ladder, not its readiness.
+    if kind == Kind::Dataset && status != "ready" {
         ui.warn(&format!(
             "The dataset is {status}, not ready — downloading what is stored."
         ));
@@ -798,7 +873,7 @@ pub async fn download(
     }
 
     std::fs::create_dir_all(&out).map_err(|e| io_err("cannot create", &out, e))?;
-    let _ = ACTIVE_DOWNLOAD.set((id.to_string(), out.clone()));
+    let _ = ACTIVE_DOWNLOAD.set((kind, id.to_string(), out.clone()));
 
     let progress = Progress {
         total,
@@ -848,7 +923,8 @@ pub async fn download(
             out.display()
         ));
         ui.info(&format!(
-            "Continue: rmsctl datasets download {id} --out {} --resume",
+            "Continue: rmsctl {} download {id} --out {} --resume",
+            kind.group(),
             out.display()
         ));
         if !ui.quiet {
@@ -884,7 +960,7 @@ pub async fn download(
     };
     if ctx.json {
         output::json_out(&json!({
-            "datasetId": outcome.dataset_id,
+            kind.id_key(): outcome.dataset_id,
             "name": name,
             "out": outcome.out.display().to_string(),
             "files": outcome.files,

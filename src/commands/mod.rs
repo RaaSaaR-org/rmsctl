@@ -8,6 +8,7 @@ pub mod deployments;
 pub mod embodiments;
 pub mod eval;
 pub mod incidents;
+pub mod model_upload;
 pub mod models;
 pub mod oversight;
 pub mod patrol;

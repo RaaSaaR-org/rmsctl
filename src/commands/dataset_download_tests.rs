@@ -504,6 +504,7 @@ fn ctx() -> Ctx {
 fn options(out: &Path) -> DownloadOptions {
     let ms = Duration::from_millis;
     DownloadOptions {
+        kind: Kind::Dataset,
         id: ID.into(),
         out: Some(out.to_path_buf()),
         parallel: 4,
