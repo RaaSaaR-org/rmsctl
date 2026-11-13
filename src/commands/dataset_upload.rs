@@ -181,7 +181,7 @@ impl Scan {
     }
 }
 
-fn io_err(what: &str, path: &Path, e: std::io::Error) -> RmsError {
+pub(super) fn io_err(what: &str, path: &Path, e: std::io::Error) -> RmsError {
     RmsError::Other(format!("{what} {}: {e}", path.display()))
 }
 
@@ -304,7 +304,7 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-async fn sha256_range_async(path: PathBuf, offset: u64, len: u64) -> RmsResult<String> {
+pub(super) async fn sha256_range_async(path: PathBuf, offset: u64, len: u64) -> RmsResult<String> {
     let shown = path.clone();
     tokio::task::spawn_blocking(move || sha256_range(&path, offset, len))
         .await
@@ -399,7 +399,7 @@ impl UploadStatus {
 // ── Errors and retries ──────────────────────────────────────────────────
 
 #[derive(Debug, PartialEq, Clone, Copy)]
-enum Retry {
+pub(super) enum Retry {
     /// Other uploads hold the part slots: wait, does not count as a failure.
     Busy,
     /// Worth sending again after a pause.
@@ -410,7 +410,7 @@ enum Retry {
 
 /// Which refusals are worth another attempt. Branches on the status and the
 /// server's stable `code`, never on the sentence.
-fn classify(status: u16, code: Option<&str>) -> Retry {
+pub(super) fn classify(status: u16, code: Option<&str>) -> Retry {
     match (status, code) {
         (503, Some("UPLOAD_BUSY")) => Retry::Busy,
         (400, Some("PART_INTERRUPTED")) | (422, Some("CHECKSUM_MISMATCH")) => Retry::Transient,
@@ -424,7 +424,7 @@ fn classify(status: u16, code: Option<&str>) -> Retry {
 
 /// Exponential pause with a little jitter, never shorter than the server's
 /// `Retry-After`, never longer than `max_pause`.
-fn backoff(tuning: &Tuning, attempt: u32, retry_after: Option<u64>) -> Duration {
+pub(super) fn backoff(tuning: &Tuning, attempt: u32, retry_after: Option<u64>) -> Duration {
     let exp = tuning
         .backoff_base
         .saturating_mul(1u32 << attempt.saturating_sub(1).min(8));
@@ -439,7 +439,7 @@ fn backoff(tuning: &Tuning, attempt: u32, retry_after: Option<u64>) -> Duration 
 
 /// Turn a refusal into the error the user reads: the server's sentence, its
 /// stable code, and the context fields that say what to change.
-fn api_error(r: &RawResponse) -> RmsError {
+pub(super) fn api_error(r: &RawResponse) -> RmsError {
     let body = r.json();
     let sentence = body
         .get("error")
@@ -479,7 +479,7 @@ fn api_error(r: &RawResponse) -> RmsError {
 ///
 /// `retry_network` is false for start: a request that died on the wire may
 /// have created the dataset, and sending it again would create a second one.
-async fn control(
+pub(super) async fn control(
     client: &ApiClient,
     method: Method,
     path: &str,
@@ -532,7 +532,7 @@ async fn control(
     }
 }
 
-fn parse<T: serde::de::DeserializeOwned>(r: &RawResponse) -> RmsResult<T> {
+pub(super) fn parse<T: serde::de::DeserializeOwned>(r: &RawResponse) -> RmsResult<T> {
     serde_json::from_str(&r.body).map_err(|e| {
         RmsError::Parse(format!(
             "{e}\n  The server sent a shape this command does not understand.\n  Body: {}",
@@ -855,7 +855,7 @@ fn human_chunk(n: u64) -> String {
     }
 }
 
-fn human_duration(secs: f64) -> String {
+pub(super) fn human_duration(secs: f64) -> String {
     if !secs.is_finite() || secs < 0.0 {
         return "-".into();
     }
@@ -869,6 +869,18 @@ fn human_duration(secs: f64) -> String {
 
 /// One progress line: bar, percentage, bytes, files, rate and ETA.
 fn progress_line(
+    done: u64,
+    total: u64,
+    files_done: usize,
+    files_total: usize,
+    rate: f64,
+) -> String {
+    transfer_line("Uploading", done, total, files_done, files_total, rate)
+}
+
+/// The progress line of a transfer in either direction; `label` says which.
+pub(super) fn transfer_line(
+    label: &str,
     done: u64,
     total: u64,
     files_done: usize,
@@ -896,7 +908,7 @@ fn progress_line(
     format!(
         "    {} {} {}{} {:>5.1}%  {} / {} · {}/{} files · {} · {}",
         "│".bright_black(),
-        format!("{:<14}", "Uploading").bright_black(),
+        format!("{label:<14}").bright_black(),
         "█".repeat(filled).truecolor(255, 103, 0),
         "░".repeat(20 - filled).bright_black(),
         pct * 100.0,
@@ -911,38 +923,38 @@ fn progress_line(
 
 /// What the command prints. `--json` keeps stdout for the final payload, so
 /// everything here goes quiet.
-struct Ui {
-    quiet: bool,
-    tty: bool,
+pub(super) struct Ui {
+    pub(super) quiet: bool,
+    pub(super) tty: bool,
 }
 
 impl Ui {
-    fn new(quiet: bool) -> Self {
+    pub(super) fn new(quiet: bool) -> Self {
         Self {
             quiet,
             tty: std::io::stdout().is_terminal(),
         }
     }
 
-    fn info(&self, msg: &str) {
+    pub(super) fn info(&self, msg: &str) {
         if !self.quiet {
             output::info(msg);
         }
     }
 
-    fn success(&self, msg: &str) {
+    pub(super) fn success(&self, msg: &str) {
         if !self.quiet {
             output::success(msg);
         }
     }
 
-    fn warn(&self, msg: &str) {
+    pub(super) fn warn(&self, msg: &str) {
         if !self.quiet {
             output::warn(msg);
         }
     }
 
-    fn field(&self, label: &str, value: &str) {
+    pub(super) fn field(&self, label: &str, value: &str) {
         if !self.quiet {
             output::field(label, value);
         }
@@ -950,7 +962,7 @@ impl Ui {
 
     /// Redraw the progress line in place on a terminal; in a log file, write a
     /// new line each time instead.
-    fn progress(&self, line: &str) {
+    pub(super) fn progress(&self, line: &str) {
         if self.quiet {
             return;
         }
@@ -962,7 +974,7 @@ impl Ui {
         }
     }
 
-    fn progress_done(&self, line: &str) {
+    pub(super) fn progress_done(&self, line: &str) {
         if self.quiet {
             return;
         }

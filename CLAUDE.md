@@ -15,7 +15,7 @@ cargo build --release          # Build release binary (target/release/rmsctl)
 cargo build                    # Debug build
 cargo fmt --check              # Check formatting
 cargo clippy -- -D warnings    # Lint
-cargo test                     # Unit tests + the upload flow against an in-process mock server
+cargo test                     # Unit tests + the upload and download flows against in-process mock servers
 ```
 
 Both gates apply to new command modules too.
@@ -75,9 +75,11 @@ src/
     updates.rs     # list, show, deployments, approve, deploy, rollback
     processes.rs   # list, show, instances, tasks, start, pause, resume, cancel, retry
     compliance.rs  # dashboard, deadlines, gaps, metrics, documents, training, inspections
-    datasets.rs    # list, show, episodes, quality, stats, validate, push, flagged, flag
+    datasets.rs    # list, show, episodes, quality, stats, validate, push, flagged, flag (dispatches upload/download)
     dataset_upload.rs        # datasets upload | upload-status | upload-cancel (direct upload)
     dataset_upload_tests.rs  # its tests, incl. a mock server that speaks the upload contract
+    dataset_download.rs      # datasets download (the stored LeRobot directory, byte for byte)
+    dataset_download_tests.rs # its tests, incl. a mock server that speaks the download contract
     training.rs    # list, show, active, queue, workers, start, cancel, retry, export, estimate
     models.rs      # list, show, lineage, compare
     deployments.rs # list, show, metrics, promote, rollback, cancel
@@ -147,6 +149,36 @@ The flow tests run against a hand-written HTTP/1.1 server in
 `dataset_upload_tests.rs` (`Mock`); extend it when the contract grows rather than
 mocking at the function level — the bugs in this feature live in headers, byte ranges
 and ordering.
+
+### Dataset download
+
+`datasets download <id> [--out <dir>]` is the way back: the stored files of a dataset,
+same relative paths, same bytes. The contract is the server's `docs/dataset-download.md`
+(`GET /datasets/:id/files` — a cursor-paged manifest of `{path, size, etag?, sha256?}` —
+and `GET /datasets/:id/files/content?path=` with `Range`). What must stay true:
+
+- **Never hold a file in memory.** The response body goes to disk chunk by chunk.
+- **A file has its real name only when it is whole.** Bytes land in `<name>.rmsctl-part`
+  and are renamed after the size — and the SHA-256, when the manifest lists one — match.
+  The hash is read back from disk, so a part continued from an earlier run is covered too.
+- **The directory is the only state.** `--resume` skips files with the manifest's size and
+  continues a part file with `Range: bytes=<len>-`; `--force` fetches everything again.
+  A non-empty directory without either flag is refused before the manifest is fetched.
+- **The manifest is not trusted with paths.** `safe_rel` checks every path before the
+  first byte is written; nothing is created when one is refused.
+- **Answers are checked, not assumed.** A `206` must carry the `Content-Range` that was
+  asked for; a `200` to a ranged request restarts the file instead of appending; a size or
+  ETag that differs from the manifest is "the dataset changed", fatal, not retried.
+- **Retries:** an attempt that delivered bytes before it died does not count against
+  `--retries` (it continues); one that delivered nothing does. `classify()` from the
+  upload decides what is transient. The first file that cannot be fetched ends the run
+  with an error — exit code 0 only when every listed file is on disk with its size.
+- Read-only on the server, so no `--yes` gate. `--json` is quiet and ends with a summary
+  object (there is no single server body to pass through).
+
+The flow tests run against their own hand-written server in `dataset_download_tests.rs`
+(paged manifest, `Range`, and faults: refusals, a connection dropped mid-body, corrupted
+bytes, an ignored `Range`, a listing that lies about a size).
 
 ### Pagination honesty
 

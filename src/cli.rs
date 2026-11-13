@@ -610,6 +610,39 @@ pub enum DatasetsCommand {
         #[arg(long, value_name = "SECS", default_value_t = 300)]
         part_timeout: u64,
     },
+    /// Download a dataset from RMS as the LeRobot directory it is stored as
+    ///
+    /// Reproduces meta/, data/, videos/ … with the same relative paths and
+    /// the same bytes, straight from the instance's storage (no Hugging Face).
+    /// Every file is checked against the size the server lists, and against
+    /// its SHA-256 where the server has one (datasets that were uploaded with
+    /// rmsctl). Unfinished files end in .rmsctl-part; --resume continues them.
+    Download {
+        /// Dataset ID
+        id: String,
+        /// Directory to write the dataset into (default: ./<dataset name>)
+        #[arg(long, short = 'o', value_name = "DIR")]
+        out: Option<std::path::PathBuf>,
+        /// Files fetched at once
+        #[arg(long, value_name = "N", default_value_t = 4, value_parser = clap::value_parser!(u8).range(1..=16))]
+        parallel: u8,
+        /// Attempts per file after a transient failure, with backoff
+        #[arg(long, value_name = "N", default_value_t = 8)]
+        retries: u32,
+        /// Continue in a non-empty directory: keep files that are complete,
+        /// continue partial ones where they stopped
+        #[arg(long, conflicts_with = "force")]
+        resume: bool,
+        /// Write into a non-empty directory and fetch every file again
+        #[arg(long)]
+        force: bool,
+        /// Verify sizes only, even where the server lists a SHA-256
+        #[arg(long)]
+        no_checksum: bool,
+        /// Seconds a request may deliver nothing before it is tried again
+        #[arg(long, value_name = "SECS", default_value_t = 60)]
+        stall_timeout: u64,
+    },
     /// What the server holds of a direct upload
     UploadStatus { id: String },
     /// Cancel a direct upload and delete what was stored

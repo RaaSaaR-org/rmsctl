@@ -1,3 +1,4 @@
+use super::dataset_download;
 use super::dataset_upload;
 use crate::cli::DatasetsCommand;
 use crate::client::ApiClient;
@@ -57,6 +58,29 @@ pub async fn run(cmd: &DatasetsCommand, client: &ApiClient, ctx: &Ctx) -> RmsRes
                 tuning: dataset_upload::Tuning::default(),
             };
             dataset_upload::run_upload(client, ctx, opts).await
+        }
+        DatasetsCommand::Download {
+            id,
+            out,
+            parallel,
+            retries,
+            resume,
+            force,
+            no_checksum,
+            stall_timeout,
+        } => {
+            let opts = dataset_download::DownloadOptions {
+                id: id.clone(),
+                out: out.clone(),
+                parallel: *parallel as usize,
+                retries: *retries,
+                resume: *resume,
+                force: *force,
+                no_checksum: *no_checksum,
+                stall_timeout: Duration::from_secs((*stall_timeout).max(1)),
+                tuning: dataset_upload::Tuning::default(),
+            };
+            dataset_download::run_download(client, ctx, opts).await
         }
         DatasetsCommand::UploadStatus { id } => dataset_upload::status(client, ctx, id).await,
         DatasetsCommand::UploadCancel { id } => dataset_upload::cancel(client, ctx, id, None).await,
