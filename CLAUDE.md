@@ -132,7 +132,8 @@ written against it and nothing else. What must stay true when touching it:
   `GET /datasets/:id/upload`. Never write into the dataset directory.
 - **Branch on `code`, never on the sentence.** `classify()` decides what is retried;
   `UPLOAD_BUSY` waits without counting against `--retries`. Start is never re-sent after
-  a network error: it may have created the dataset.
+  a network error or a proxy's 5xx (one without a `code`): it may have created the
+  dataset. A refusal the server wrote itself created nothing and is retried.
 - **Stop sending once the server answered.** Most refusals arrive before the body is
   read; the body stream ends itself then, or a 32 MiB part is pushed up a slow link for
   nothing (and the progress bar overshoots).

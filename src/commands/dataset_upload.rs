@@ -503,8 +503,20 @@ async fn control(
                 let code = r.code();
                 // On a control call a 5xx with a code is the server's own
                 // verdict (STORAGE_UNAVAILABLE aside), not a hiccup.
-                let again = matches!(r.status, 429 | 502 | 503 | 504)
-                    && classify(r.status, code.as_deref()) != Retry::Fatal;
+                //
+                // A 502/503/504 without a code comes from a proxy, and says
+                // nothing about whether the server acted. A call that must not
+                // run twice (start) is therefore only re-sent after a refusal
+                // the server itself wrote — that one created nothing.
+                let from_server = code.as_deref().is_some_and(|c| !c.is_empty());
+                let again = match r.status {
+                    429 => true,
+                    502..=504 => {
+                        classify(r.status, code.as_deref()) != Retry::Fatal
+                            && (retry_network || from_server)
+                    }
+                    _ => false,
+                };
                 if !again || attempt >= ATTEMPTS {
                     return Ok(r);
                 }
@@ -1630,7 +1642,21 @@ async fn start(
     )
     .await?;
     if !r.is_success() {
-        return Err(api_error(&r));
+        let mut error = api_error(&r);
+        // A proxy's 5xx (no `code`) does not say whether the request reached
+        // the server. It is not sent again — that could create a second
+        // dataset — so say where a first one would be found.
+        if r.status >= 500
+            && r.code().is_none_or(|c| c.is_empty())
+            && let RmsError::Api { message, .. } = &mut error
+        {
+            message.push_str(
+                "\n  This answer came from a proxy, so the server may still have started the upload.\n  \
+                 Before trying again, look for a dataset in status 'uploading' (rmsctl datasets list)\n  \
+                 and discard it with: rmsctl datasets upload-cancel <id> --yes",
+            );
+        }
+        return Err(error);
     }
     let started: StartResponse = parse(&r)?;
 

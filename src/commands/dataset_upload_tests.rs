@@ -494,6 +494,9 @@ struct Mock {
     import_error: Option<Value>,
     polls_before_verdict: u32,
     faults: VecDeque<Fault>,
+    /// Answer the next start requests with these refusals; an empty code is a
+    /// proxy's answer (no `code` in the body).
+    start_refusals: VecDeque<(u16, &'static str)>,
     /// Answer this many part requests with UPLOAD_BUSY as soon as the headers
     /// are in, without reading the body — what the real server does.
     early_busy: u32,
@@ -597,6 +600,11 @@ impl Mock {
         let base = format!("/api/datasets/{DS}");
 
         if method == "POST" && path == "/api/datasets/uploads" {
+            match self.start_refusals.pop_front() {
+                Some((status, "")) => return (status, None, Value::Null),
+                Some((status, code)) => return Mock::refusal(status, code),
+                None => {}
+            }
             let req: Value = serde_json::from_slice(body).unwrap();
             self.files = req["files"]
                 .as_array()
@@ -1505,6 +1513,44 @@ async fn start_refusals_show_the_code_and_create_no_note() {
         err.contains("API error (404)") && err.contains("[NOT_FOUND]"),
         "{err}"
     );
+    assert_eq!(std::fs::read_dir(&srv.state.0).unwrap().count(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn start_is_sent_again_only_after_a_refusal_the_server_wrote() {
+    // The server's own 503 says nothing was created: wait and start again.
+    let data = dataset("start-retry");
+    let mut mock = Mock::new(16);
+    mock.start_refusals.push_back((503, "STORAGE_UNAVAILABLE"));
+    let srv = server(mock).await;
+    let opts = options(&data.0, &srv.state);
+
+    let outcome = upload(&srv.client, &ctx(true), &opts).await.unwrap();
+
+    assert_eq!(outcome.status, "ready");
+    assert_eq!(
+        srv.mock.lock().unwrap().count("POST /api/datasets/uploads"),
+        2
+    );
+
+    // A proxy's 504 does not: the server may have created the dataset, and a
+    // second start would create another one.
+    let data = dataset("start-once");
+    let mut mock = Mock::new(16);
+    mock.start_refusals.push_back((504, ""));
+    let srv = server(mock).await;
+    let opts = options(&data.0, &srv.state);
+
+    let err = upload(&srv.client, &ctx(true), &opts)
+        .await
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("API error (504)"), "{err}");
+    assert!(err.contains("may still have started the upload"), "{err}");
+    let m = srv.mock.lock().unwrap();
+    assert_eq!(m.count("POST /api/datasets/uploads"), 1);
+    assert!(m.puts().is_empty());
     assert_eq!(std::fs::read_dir(&srv.state.0).unwrap().count(), 0);
 }
 
