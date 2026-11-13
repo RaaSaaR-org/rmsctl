@@ -154,6 +154,9 @@ rmsctl datasets quality <id> | stats <id>        # Qualitaet & Statistik
 rmsctl datasets validate <id> [--advanced]       # Validierung
 rmsctl datasets push <id> --hf-token X --repo-id org/name
 rmsctl datasets push-status <id>
+rmsctl datasets upload <dir> [--name X]          # LeRobot-Verzeichnis direkt hochladen (ohne Hugging Face)
+rmsctl datasets upload-status <id>               # Was der Server von einem Upload haelt
+rmsctl datasets upload-cancel <id>               # Upload abbrechen, Gespeichertes loeschen
 rmsctl datasets flagged <id>                     # Markierte Episoden
 rmsctl datasets flag <id> <index> [--reason X]
 
@@ -164,6 +167,80 @@ rmsctl training start --config job.json          # Job starten
 rmsctl training cancel <id> | retry <id>
 rmsctl training export <id> | estimate <id>
 ```
+
+#### Datensatz direkt hochladen
+
+`rmsctl datasets upload` schickt ein LeRobot-Verzeichnis (v2.x oder v3.0) vom eigenen
+Rechner direkt in eine RMS-Instanz — ohne Umweg ueber Hugging Face. Der Datensatz landet
+im selben Zustand wie nach einem Hub-Import: Datensatzseite, Episoden-Browser, Video und
+Training funktionieren unveraendert.
+
+```bash
+# 1. Ansehen, was passieren wuerde (sendet nichts)
+rmsctl --server https://neodem.example/api datasets upload /data/g1-dex3-bottle-sorting-sim
+
+# 2. Hochladen, auf die Validierung warten, Ergebnis ausgeben
+rmsctl --server https://neodem.example/api datasets upload /data/g1-dex3-bottle-sorting-sim \
+  --name "G1 Dex3 bottle sorting" --yes
+```
+
+```
+  ◈ Upload: G1 Dex3 bottle sorting
+    │ Source         /data/g1-dex3-bottle-sorting-sim
+    │ Format         LeRobot v3.0 · unitree_g1_dex3 · 30 fps · 80 episodes
+    │ Files          7 (446.1 MB) — 1 other entry left out
+  [OK] Upload started: dataset 3fb4173c-… (rustfs store, 32 MiB parts, 19 part(s))
+    │ Uploading      ████████░░░░░░░░░░░░  41.2%  183.8 MB / 446.1 MB · 5/7 files · 12.4 MB/s · ETA 21s
+  [OK] Sent 446.1 MB in 36s (12.4 MB/s)
+  [--] The server is assembling the files and verifying checksums …
+  [OK] Dataset ready
+    │ ID             3fb4173c-81e8-4311-aa13-1b1970f886fc
+    │ Status         ● ready
+    │ Episodes       80
+    │ Frames         55 695
+    │ Validation
+    │ Result         valid
+```
+
+`<dir>` ist das Verzeichnis, das `meta/` und `data/` enthaelt. Gesendet werden nur die
+Dateien eines LeRobot-Baums (`meta/**`, `data/**/*.parquet`, `videos/**/*.mp4`,
+`images/**`); `README.md`, `.git` usw. bleiben liegen. Ohne `videos/` entsteht ein
+Datensatz im Modus `metadata`.
+
+| Flag | Bedeutung |
+| --- | --- |
+| `--name`, `--description` | Name (Default: Verzeichnisname) und Beschreibung |
+| `--robot-type <id>` | Robotertyp festlegen; sonst wird er aus `meta/info.json` zugeordnet oder angelegt |
+| `--chunk-size <groesse>` | Teilgroesse, z. B. `8M` (min. 5M; Default und Maximum setzt der Server: 32M) |
+| `--parallel <n>` | Gleichzeitig gesendete Teile (Default 3; der Server nimmt insgesamt 4 an) |
+| `--retries <n>` | Versuche pro Teil nach voruebergehenden Fehlern, mit Backoff (Default 8) |
+| `--resume <id>` | Einen bestimmten Upload fortsetzen (z. B. von einem anderen Rechner) |
+| `--restart` | Den gemerkten Upload verwerfen und neu beginnen |
+| `--no-checksum` | Kein SHA-256 ueber ganze Dateien (Teile werden weiterhin einzeln geprueft) |
+| `--no-wait` | Nach dem letzten Teil zurueckkehren, nicht auf die Validierung warten |
+| `--wait-timeout`, `--part-timeout` | Sekunden fuer das Urteil des Servers (1800) bzw. fuer einen Teil (300) |
+
+- **Fortsetzen:** Bricht der Upload ab (Ctrl-C, Netz weg, Rechner aus), denselben Befehl
+  noch einmal ausfuehren. `rmsctl` fragt den Server, welche Teile er schon hat, und sendet
+  nur den Rest. Lokal wird nur gemerkt, welche Upload-ID zu welchem Verzeichnis gehoert
+  (`~/.local/state/rmsctl/uploads/`, ueberschreibbar mit `RMSCTL_STATE_DIR`) — nie im
+  Datensatz-Verzeichnis selbst.
+- **Abbrechen:** `rmsctl datasets upload-cancel <id> --yes` entfernt alle gespeicherten
+  Teile und den Datensatz-Eintrag. Das gilt auch fuer einen hochgeladenen Datensatz, den
+  die Validierung abgelehnt hat. Ein Upload ohne Aktivitaet verfaellt serverseitig nach
+  6 Stunden von selbst.
+- **Speicherbedarf:** Dateien werden von der Platte gestreamt, nie ganz geladen. Der
+  Speicherverbrauch haengt weder von Datei- noch von Teilgroesse noch von `--parallel` ab
+  (gemessen: ca. 30 MB fuer 446 MB mit zwei 210-MB-Videos).
+- **Pruefsummen:** Jeder Teil traegt seinen SHA-256 (`X-Chunk-Sha256`); zusaetzlich wird
+  pro Datei ein SHA-256 angemeldet, den der Server nach dem Zusammensetzen gegenliest.
+- **Hinter einem Proxy:** Jede Anfrage traegt hoechstens einen Teil und wartet nie auf
+  lange Serverarbeit. Auf einer langsamen Leitung `--chunk-size 8M` waehlen: ein Teil muss
+  innerhalb des Proxy-Timeouts (ca. 100 s) ankommen.
+- **Exit-Code:** 0 nur, wenn der Datensatz `ready` ist. Bei `failed` (Validierung oder
+  Pruefsumme) werden die Befunde ausgegeben und der Befehl endet mit 1; Ctrl-C endet mit 130.
+- **`--json`:** keine Fortschrittsanzeige; am Ende steht der unveraenderte
+  `GET /datasets/<id>`-Payload auf stdout.
 
 ### Modelle & Deployment
 
@@ -264,9 +341,10 @@ vhs tapes/status.tape       # Flotten-Dashboard
 vhs tapes/robots.tape       # Roboter-Liste & Details
 vhs tapes/telemetry.tape    # Telemetrie-Ansicht
 vhs tapes/pipeline.tape     # Daten- & Training-Pipeline
+vhs tapes/upload.tape       # Datensatz direkt hochladen (braucht ein LeRobot-Verzeichnis)
 vhs tapes/demo.tape         # Komplette Demo
 ```
 
 ## Stack
 
-Rust, [clap](https://docs.rs/clap) (CLI), [reqwest](https://docs.rs/reqwest) (HTTP), [colored](https://docs.rs/colored) (Terminal-Output), [tokio](https://docs.rs/tokio) (Async).
+Rust, [clap](https://docs.rs/clap) (CLI), [reqwest](https://docs.rs/reqwest) (HTTP), [colored](https://docs.rs/colored) (Terminal-Output), [tokio](https://docs.rs/tokio) (Async), [sha2](https://docs.rs/sha2) (Pruefsummen beim Upload).
