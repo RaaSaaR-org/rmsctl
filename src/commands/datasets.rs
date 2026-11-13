@@ -70,6 +70,7 @@ pub async fn run(cmd: &DatasetsCommand, client: &ApiClient, ctx: &Ctx) -> RmsRes
             stall_timeout,
         } => {
             let opts = dataset_download::DownloadOptions {
+                kind: dataset_download::Kind::Dataset,
                 id: id.clone(),
                 out: out.clone(),
                 parallel: *parallel as usize,

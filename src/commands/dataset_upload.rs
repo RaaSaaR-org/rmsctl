@@ -161,11 +161,11 @@ pub fn is_dataset_file(rel: &str) -> bool {
 const TREE_ROOTS: [&str; 4] = ["meta", "data", "videos", "images"];
 
 #[derive(Debug, Clone, PartialEq)]
-struct LocalFile {
-    /// Path relative to the dataset root, forward slashes.
-    rel: String,
-    abs: PathBuf,
-    size: u64,
+pub(super) struct LocalFile {
+    /// Path relative to the upload root, forward slashes.
+    pub(super) rel: String,
+    pub(super) abs: PathBuf,
+    pub(super) size: u64,
 }
 
 #[derive(Debug, Default)]
@@ -300,7 +300,7 @@ fn sha256_range(path: &Path, offset: u64, len: u64) -> std::io::Result<String> {
     Ok(hex(&hasher.finalize()))
 }
 
-fn hex(bytes: &[u8]) -> String {
+pub(super) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
@@ -316,17 +316,17 @@ pub(super) async fn sha256_range_async(path: PathBuf, offset: u64, len: u64) -> 
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct RemoteFile {
-    id: u64,
-    path: String,
+pub(super) struct RemoteFile {
+    pub(super) id: u64,
+    pub(super) path: String,
     #[serde(default)]
-    size: u64,
+    pub(super) size: u64,
     #[serde(default)]
-    part_count: Option<u32>,
+    pub(super) part_count: Option<u32>,
     #[serde(default)]
-    complete: bool,
+    pub(super) complete: bool,
     #[serde(default)]
-    received_parts: Vec<u32>,
+    pub(super) received_parts: Vec<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -572,14 +572,15 @@ async fn fetch_status(
 /// outside the dataset directory — that is often read-only and never ours to
 /// write into. It holds no progress: what is stored is asked of the server.
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
-struct SavedUpload {
+pub(super) struct SavedUpload {
     server: String,
     dir: String,
-    dataset_id: String,
-    name: String,
+    /// The id the server gave the upload (a dataset id, or a model upload id).
+    pub(super) dataset_id: String,
+    pub(super) name: String,
 }
 
-struct StateStore {
+pub(super) struct StateStore {
     dir: Option<PathBuf>,
     server: String,
     source: String,
@@ -597,7 +598,7 @@ fn default_state_dir() -> Option<PathBuf> {
 }
 
 impl StateStore {
-    fn new(dir: Option<PathBuf>, server: &str, source: &Path) -> Self {
+    pub(super) fn new(dir: Option<PathBuf>, server: &str, source: &Path) -> Self {
         Self {
             dir: dir.or_else(default_state_dir),
             server: server.to_string(),
@@ -614,7 +615,7 @@ impl StateStore {
         Some(self.dir.as_ref()?.join(format!("{}.json", &key[..24])))
     }
 
-    fn load(&self) -> Option<SavedUpload> {
+    pub(super) fn load(&self) -> Option<SavedUpload> {
         let text = std::fs::read_to_string(self.path()?).ok()?;
         let saved: SavedUpload = serde_json::from_str(&text).ok()?;
         (saved.server == self.server && saved.dir == self.source).then_some(saved)
@@ -622,7 +623,7 @@ impl StateStore {
 
     /// Best effort: an upload that cannot be noted still uploads; it just has
     /// to be resumed with `--resume <id>`. Returns whether the note was kept.
-    fn save(&self, dataset_id: &str, name: &str) -> bool {
+    pub(super) fn save(&self, dataset_id: &str, name: &str) -> bool {
         let Some(path) = self.path() else {
             return false;
         };
@@ -641,7 +642,7 @@ impl StateStore {
         write().is_ok()
     }
 
-    fn remove(&self) {
+    pub(super) fn remove(&self) {
         if let Some(path) = self.path() {
             let _ = std::fs::remove_file(path);
         }
@@ -650,7 +651,7 @@ impl StateStore {
 
 /// Drop every note that points at `dataset_id` on `server` — after a cancel,
 /// which is addressed by id and does not know the directory.
-fn forget_dataset(dir: Option<PathBuf>, server: &str, dataset_id: &str) {
+pub(super) fn forget_dataset(dir: Option<PathBuf>, server: &str, dataset_id: &str) {
     let Some(dir) = dir.or_else(default_state_dir) else {
         return;
     };
@@ -674,7 +675,7 @@ fn forget_dataset(dir: Option<PathBuf>, server: &str, dataset_id: &str) {
 // ── Plan: which parts still have to go ──────────────────────────────────
 
 #[derive(Debug)]
-struct PlanFile {
+pub(super) struct PlanFile {
     id: u64,
     rel: String,
     abs: PathBuf,
@@ -683,18 +684,18 @@ struct PlanFile {
 }
 
 #[derive(Debug)]
-struct Plan {
+pub(super) struct Plan {
     chunk_size: u64,
     files: Vec<PlanFile>,
-    total_bytes: u64,
+    pub(super) total_bytes: u64,
 }
 
 impl Plan {
-    fn missing_parts(&self) -> usize {
+    pub(super) fn missing_parts(&self) -> usize {
         self.files.iter().map(|f| f.missing.len()).sum()
     }
 
-    fn missing_bytes(&self) -> u64 {
+    pub(super) fn missing_bytes(&self) -> u64 {
         self.files
             .iter()
             .map(|f| {
@@ -710,7 +711,7 @@ impl Plan {
 /// Match what the server expects against what is on disk and list the parts
 /// it does not hold yet. Refuses when the two disagree: a directory that
 /// changed since the upload was declared cannot be resumed into it.
-fn build_plan(
+pub(super) fn build_plan(
     local: &[LocalFile],
     remote: &[RemoteFile],
     ignored: &HashSet<String>,
@@ -779,22 +780,22 @@ fn changed(what: String) -> RmsError {
 
 // ── Progress ────────────────────────────────────────────────────────────
 
-struct Progress {
+pub(super) struct Progress {
     total: u64,
     /// Bytes the server already held when this run began.
     base: u64,
     /// Bytes handed to the network in this run (rolled back when a part fails).
-    sent: AtomicU64,
+    pub(super) sent: AtomicU64,
     files_total: usize,
     files_done: AtomicUsize,
     /// Parts each file still needs, by index into the plan.
     remaining: Vec<AtomicUsize>,
-    parts_sent: AtomicUsize,
-    started: Instant,
+    pub(super) parts_sent: AtomicUsize,
+    pub(super) started: Instant,
 }
 
 impl Progress {
-    fn new(plan: &Plan) -> Self {
+    pub(super) fn new(plan: &Plan) -> Self {
         let missing = plan.missing_bytes();
         Self {
             total: plan.total_bytes,
@@ -814,7 +815,7 @@ impl Progress {
         }
     }
 
-    fn line(&self) -> String {
+    pub(super) fn line(&self) -> String {
         let sent = self.sent.load(Ordering::Relaxed);
         let done = (self.base + sent).min(self.total);
         let secs = self.started.elapsed().as_secs_f64();
@@ -846,7 +847,7 @@ pub fn human_bytes(n: u64) -> String {
 }
 
 /// A part size, which is a binary quantity: `32 MiB`, not `33.6 MB`.
-fn human_chunk(n: u64) -> String {
+pub(super) fn human_chunk(n: u64) -> String {
     const MIB: u64 = 1024 * 1024;
     if n >= MIB && n.is_multiple_of(MIB) {
         format!("{} MiB", n / MIB)
@@ -985,7 +986,7 @@ impl Ui {
         }
     }
 
-    async fn tick(&self, progress: &Progress) {
+    pub(super) async fn tick(&self, progress: &Progress) {
         // A terminal gets a smooth bar; a log gets a line every few seconds.
         let every = if self.tty {
             Duration::from_millis(200)
@@ -1016,7 +1017,8 @@ struct Attempt {
 
 struct PartJob<'a> {
     client: &'a ApiClient,
-    dataset_id: &'a str,
+    /// The upload's own path: parts live at `<base>/files/:fileId/parts/:n`.
+    base: &'a str,
     file: &'a PlanFile,
     chunk_size: u64,
     part: u32,
@@ -1071,10 +1073,7 @@ async fn try_part(job: &PartJob<'_>, progress: &Arc<Progress>) -> Result<(), Par
         reqwest::Body::wrap_stream(stream)
     };
 
-    let path = format!(
-        "/datasets/{}/upload/files/{}/parts/{}",
-        job.dataset_id, job.file.id, job.part
-    );
+    let path = format!("{}/files/{}/parts/{}", job.base, job.file.id, job.part);
     // Content-Length is set by hand: a streamed body would otherwise go out
     // chunked, which the server answers with 411.
     let req = job
@@ -1195,13 +1194,41 @@ async fn send_part(
     }
 }
 
+/// What sending parts needs to know, whatever is being uploaded.
+#[derive(Clone, Copy)]
+pub(super) struct SendOptions {
+    pub(super) parallel: usize,
+    pub(super) retries: u32,
+    pub(super) part_timeout: Duration,
+    pub(super) tuning: Tuning,
+}
+
+impl UploadOptions {
+    fn send(&self) -> SendOptions {
+        SendOptions {
+            parallel: self.parallel,
+            retries: self.retries,
+            part_timeout: self.part_timeout,
+            tuning: self.tuning,
+        }
+    }
+}
+
+/// The path every call of one dataset upload hangs off.
+fn upload_base(dataset_id: &str) -> String {
+    format!("/datasets/{dataset_id}/upload")
+}
+
 /// Send every missing part, `parallel` at a time. The first part that cannot
 /// be sent ends the run; everything stored so far stays on the server.
-async fn send_missing(
+///
+/// `base` is the upload's own path (`/datasets/:id/upload`,
+/// `/models/uploads/:id`); a part goes to `<base>/files/:fileId/parts/:n`.
+pub(super) async fn send_missing(
     client: &ApiClient,
-    dataset_id: &str,
+    base: &str,
     plan: &Plan,
-    opts: &UploadOptions,
+    opts: &SendOptions,
     progress: &Arc<Progress>,
 ) -> RmsResult<()> {
     let jobs: Vec<(usize, u32)> = plan
@@ -1215,7 +1242,7 @@ async fn send_missing(
         .try_for_each_concurrent(opts.parallel.max(1), |(index, part)| async move {
             let job = PartJob {
                 client,
-                dataset_id,
+                base,
                 file: &plan.files[index],
                 chunk_size: plan.chunk_size,
                 part,
@@ -1474,8 +1501,9 @@ pub async fn upload(
         let progress = Arc::new(Progress::new(&plan));
         if plan.missing_parts() > 0 {
             ui.progress(&progress.line());
+            let (base, send) = (upload_base(&dataset_id), opts.send());
             let sent = tokio::select! {
-                r = send_missing(client, &dataset_id, &plan, opts, &progress) => r,
+                r = send_missing(client, &base, &plan, &send, &progress) => r,
                 _ = ui.tick(&progress) => unreachable!("the progress ticker never returns"),
             };
             ui.progress_done(&progress.line());
@@ -1947,7 +1975,7 @@ pub async fn status(client: &ApiClient, ctx: &Ctx, id: &str) -> RmsResult<()> {
     Ok(())
 }
 
-fn upload_state(state: &str) -> String {
+pub(super) fn upload_state(state: &str) -> String {
     match state {
         "ready" => format!("{} {}", "●".bright_black(), state.green().bold()),
         "uploading" | "processing" | "validating" | "cancelling" => {

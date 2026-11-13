@@ -78,10 +78,12 @@ src/
     datasets.rs    # list, show, episodes, quality, stats, validate, push, flagged, flag (dispatches upload/download)
     dataset_upload.rs        # datasets upload | upload-status | upload-cancel (direct upload)
     dataset_upload_tests.rs  # its tests, incl. a mock server that speaks the upload contract
-    dataset_download.rs      # datasets download (the stored LeRobot directory, byte for byte)
+    dataset_download.rs      # datasets download — and models download (Kind::Model)
     dataset_download_tests.rs # its tests, incl. a mock server that speaks the download contract
     training.rs    # list, show, active, queue, workers, start, cancel, retry, export, estimate
-    models.rs      # list, show, lineage, compare
+    models.rs      # list, show, lineage, compare, delete — and the dispatch of upload/files/download
+    model_upload.rs        # models upload | upload-status | upload-cancel | files
+    model_upload_tests.rs  # its tests, incl. a mock server that speaks the model contract
     deployments.rs # list, show, metrics, promote, rollback, cancel
     skills.rs      # list, show, for-robot, compatible, check, validate, publish, execute
     embodiments.rs # list, show
@@ -179,6 +181,34 @@ and `GET /datasets/:id/files/content?path=` with `Range`). What must stay true:
 The flow tests run against their own hand-written server in `dataset_download_tests.rs`
 (paged manifest, `Range`, and faults: refusals, a connection dropped mid-body, corrupted
 bytes, an ignored `Range`, a listing that lies about a size).
+
+### Direct model upload and download
+
+`models upload <dir> --version …` sends a checkpoint directory into the instance's model
+store and registers it; `models download <id>` brings one back. The contract is the
+server's `docs/model-upload.md`. Both are the dataset commands' engines pointed at the
+model routes — the server speaks the same part protocol and hands files out the same way:
+
+- **Upload** — `model_upload.rs` reuses `dataset_upload.rs` (`send_missing`, `build_plan`,
+  `control`, `StateStore`, `Ui`, `Progress`, all `pub(super)`), which takes the upload's
+  base path (`/datasets/:id/upload` or `/models/uploads/:id`).
+- **Download** — `dataset_download.rs` takes a `Kind` (`Dataset` | `Model`) that says where
+  the routes hang (`/datasets/:id` or `/models/versions/:id`, each with `/files` and
+  `/files/content?path=`) and what the thing is called in messages. Everything under
+  "Dataset download" holds for a model unchanged.
+
+Everything listed under "Direct dataset upload" holds here too. What is different, and
+must stay true:
+
+- **Every file of the directory is a candidate.** A checkpoint has no fixed layout;
+  `--exclude` (gitignore-style, `excluded()`) is the only filter.
+- **The verdict is the registry.** The upload's `state` goes `completed` (a ModelVersion
+  with the upload's id exists) or `failed` (nothing was registered). Exit code 0 only for
+  `completed`. `upload-cancel` refuses a completed upload and names `models delete`.
+- **The note key carries `#models`** (`note_server`), so one directory uploaded as a
+  dataset and as a model to the same server keeps two notes.
+- **A new kind of download is a `Kind` variant, not a copy.** Paths and nouns go through
+  `Kind`; nothing else in the engine may name a dataset.
 
 ### Pagination honesty
 

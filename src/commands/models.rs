@@ -1,3 +1,6 @@
+use super::dataset_download;
+use super::dataset_upload::{Tuning, human_bytes};
+use super::model_upload;
 use crate::cli::ModelsCommand;
 use crate::client::ApiClient;
 use crate::ctx::Ctx;
@@ -7,6 +10,7 @@ use crate::output;
 use colored::*;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::time::Duration;
 
 pub async fn run(cmd: &ModelsCommand, client: &ApiClient, ctx: &Ctx) -> RmsResult<()> {
     match cmd {
@@ -18,6 +22,84 @@ pub async fn run(cmd: &ModelsCommand, client: &ApiClient, ctx: &Ctx) -> RmsResul
             version_b,
             metrics,
         } => compare(client, ctx, version_a, version_b, metrics.as_deref()).await,
+        ModelsCommand::Upload {
+            dir,
+            name,
+            model_version,
+            model_type,
+            base_model,
+            dataset,
+            metrics,
+            eval_metrics,
+            notes,
+            exclude,
+            chunk_size,
+            parallel,
+            retries,
+            resume,
+            restart,
+            no_checksum,
+            no_wait,
+            wait_timeout,
+            part_timeout,
+        } => {
+            let opts = model_upload::ModelUploadOptions {
+                dir: dir.clone(),
+                name: name.clone(),
+                version: model_version.clone(),
+                model_type: model_type.clone(),
+                base_model: base_model.clone(),
+                dataset: dataset.clone(),
+                metrics: metrics.clone(),
+                eval_metrics: eval_metrics.clone(),
+                notes: notes.clone(),
+                exclude: exclude.clone(),
+                chunk_size: *chunk_size,
+                parallel: *parallel as usize,
+                retries: *retries,
+                resume: resume.clone(),
+                restart: *restart,
+                no_checksum: *no_checksum,
+                no_wait: *no_wait,
+                wait_timeout: Duration::from_secs(*wait_timeout),
+                part_timeout: Duration::from_secs((*part_timeout).max(1)),
+                state_dir: None,
+                tuning: Tuning::default(),
+            };
+            model_upload::run_upload(client, ctx, opts).await
+        }
+        ModelsCommand::UploadStatus { id } => {
+            model_upload::status(client, ctx, id.as_deref()).await
+        }
+        ModelsCommand::UploadCancel { id } => model_upload::cancel(client, ctx, id, None).await,
+        ModelsCommand::Files { id } => model_upload::files(client, ctx, id).await,
+        ModelsCommand::Download {
+            id,
+            out,
+            parallel,
+            retries,
+            resume,
+            force,
+            no_checksum,
+            stall_timeout,
+        } => {
+            // The dataset download's engine: the server hands a model's files
+            // out the same way.
+            let opts = dataset_download::DownloadOptions {
+                kind: dataset_download::Kind::Model,
+                id: resolve_id(client, id).await?,
+                out: out.clone(),
+                parallel: *parallel as usize,
+                retries: *retries,
+                resume: *resume,
+                force: *force,
+                no_checksum: *no_checksum,
+                stall_timeout: Duration::from_secs((*stall_timeout).max(1)),
+                tuning: Tuning::default(),
+            };
+            dataset_download::run_download(client, ctx, opts).await
+        }
+        ModelsCommand::Delete { id } => delete(client, ctx, id).await,
     }
 }
 
@@ -51,6 +133,19 @@ struct ModelVersionRow {
     training_job_id: Option<String>,
     #[serde(default)]
     parent_model_version_id: Option<String>,
+    // What a model without a training job on this server says about itself:
+    // an uploaded checkpoint states its base model and training dataset.
+    #[serde(default)]
+    base_model: Option<String>,
+    #[serde(default)]
+    dataset_id: Option<String>,
+    #[serde(default)]
+    notes: Option<String>,
+    // Set only for a model whose files this instance stores.
+    #[serde(default)]
+    artifact_size_bytes: Option<u64>,
+    #[serde(default)]
+    artifact_file_count: Option<u64>,
     // Metric values are heterogeneous — a scalar, a string ("trainer") or a
     // per-epoch array — so they stay as raw JSON.
     #[serde(default)]
@@ -140,6 +235,41 @@ struct ModelVersionDetailResponse {
     model_version: ModelVersionRow,
     #[serde(default)]
     evaluation: Option<EvalRollup>,
+    /// The dataset `datasetId` names, when it still exists on the instance.
+    #[serde(default)]
+    trained_on_dataset: Option<DatasetRef>,
+    /// Present for a model uploaded to this instance.
+    #[serde(default)]
+    storage: Option<StoredFiles>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DatasetRef {
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredFiles {
+    #[serde(default)]
+    storage: Option<String>,
+    #[serde(default)]
+    files_removed_at: Option<String>,
+}
+
+/// How a model got into the registry, in words.
+fn source_label(kind: &str) -> &str {
+    match kind {
+        "uploaded" => "uploaded directly",
+        "training" => "trained here",
+        "imported" => "registered from outside",
+        "derived" => "derived from another model",
+        other => other,
+    }
 }
 
 /// Counted over the EvaluationEpisode rows carrying this model's id, so a model
@@ -198,20 +328,39 @@ async fn list(client: &ApiClient, ctx: &Ctx) -> RmsResult<()> {
     output::table_header(&[
         ("ID", output::ID_W),
         ("NAME", 26),
-        ("VERSION", 12),
-        ("TYPE", 10),
+        ("VERSION", 14),
+        ("BASE", 11),
+        ("SOURCE", 9),
+        ("SIZE", 9),
         ("STATUS", 14),
     ]);
     for m in &resp.model_versions {
         println!(
-            "    {} {} {} {} {}",
+            "    {} {} {} {} {} {} {}",
             output::pad(&m.id, output::ID_W),
             output::pad(&output::truncate(m.name.as_deref().unwrap_or("-"), 26), 26),
             output::pad(
-                &output::truncate(m.version.as_deref().unwrap_or("-"), 12),
-                12
+                &output::truncate(m.version.as_deref().unwrap_or("-"), 14),
+                14
             ),
-            output::pad(m.model_type.as_deref().unwrap_or("-"), 10),
+            // A model that states no base model falls back to its kind.
+            output::pad(
+                &output::truncate(
+                    m.base_model
+                        .as_deref()
+                        .or(m.model_type.as_deref())
+                        .unwrap_or("-"),
+                    11
+                ),
+                11
+            ),
+            output::pad(m.source_kind.as_deref().unwrap_or("-"), 9),
+            output::pad(
+                &m.artifact_size_bytes
+                    .map(human_bytes)
+                    .unwrap_or_else(|| "-".into()),
+                9
+            ),
             deployment_indicator(m.deployment_status.as_deref().unwrap_or("unknown")),
         );
     }
@@ -257,10 +406,19 @@ async fn show(client: &ApiClient, ctx: &Ctx, ident: &str) -> RmsResult<()> {
     }
 
     let resp: ModelVersionDetailResponse = client.get(&path).await?;
-    let m = &resp.model_version;
+    output::section(
+        "◈",
+        &format!("Model Version: {}", resp.model_version.label().bold()),
+    );
+    render_detail(&resp);
+    println!();
+    Ok(())
+}
 
-    output::section("◈", &format!("Model Version: {}", m.label().bold()));
+fn render_detail(resp: &ModelVersionDetailResponse) {
+    let m = &resp.model_version;
     render_identity(m);
+    render_origin(resp);
 
     if let Some(e) = &resp.evaluation {
         render_evaluation(e);
@@ -268,7 +426,96 @@ async fn show(client: &ApiClient, ctx: &Ctx, ident: &str) -> RmsResult<()> {
     render_metrics("Training metrics", m.training_metrics.as_ref());
     render_metrics("Validation metrics", m.validation_metrics.as_ref());
     render_relations(m);
+}
 
+/// Draw the body of `GET /models/versions/:id` — for a command that has the
+/// body in hand already, like `models upload` once the model is registered.
+pub(crate) fn render_result(value: &Value) -> RmsResult<()> {
+    let resp: ModelVersionDetailResponse = serde_json::from_value(value.clone())?;
+    render_detail(&resp);
+    Ok(())
+}
+
+/// What the model was made from and what the instance stores of it.
+fn render_origin(resp: &ModelVersionDetailResponse) {
+    let m = &resp.model_version;
+    if let Some(base) = &m.base_model {
+        output::field("Base model", base);
+    }
+    match (&resp.trained_on_dataset, &m.dataset_id) {
+        (Some(d), _) => output::field(
+            "Trained on",
+            &format!(
+                "{} ({})",
+                d.name.as_deref().unwrap_or("-"),
+                d.id.as_deref().unwrap_or("-")
+            ),
+        ),
+        (None, Some(id)) => {
+            output::field("Trained on", &format!("{id} (no longer on this instance)"))
+        }
+        (None, None) => {}
+    }
+    if let Some(bytes) = m.artifact_size_bytes {
+        let files = m
+            .artifact_file_count
+            .map(|n| format!(" in {n} file(s)"))
+            .unwrap_or_default();
+        output::field("Stored", &format!("{}{files}", human_bytes(bytes)));
+    }
+    if let Some(removed) = resp
+        .storage
+        .as_ref()
+        .and_then(|s| s.files_removed_at.as_deref())
+    {
+        output::field_colored("Files", format!("removed {removed}").red());
+    } else if let Some(store) = resp.storage.as_ref().and_then(|s| s.storage.as_deref()) {
+        output::field("Store", store);
+    }
+    if let Some(notes) = m.notes.as_deref().filter(|n| !n.is_empty()) {
+        output::field("Notes", notes);
+    }
+}
+
+// ── delete ──────────────────────────────────────────────────────────────
+
+/// `DELETE /models/versions/:id` archives the row — deployments, evaluations
+/// and lineage point at it — and, for a model uploaded to the instance,
+/// removes the files it stored.
+async fn delete(client: &ApiClient, ctx: &Ctx, ident: &str) -> RmsResult<()> {
+    let id = resolve_id(client, ident).await?;
+    let path = format!("/models/versions/{id}");
+    let detail: ModelVersionDetailResponse = client.get(&path).await?;
+    let m = &detail.model_version;
+    let stored = match (m.artifact_size_bytes, &detail.storage) {
+        (Some(bytes), Some(s)) if s.files_removed_at.is_none() => {
+            format!(
+                " and delete the {} this instance stores for it",
+                human_bytes(bytes)
+            )
+        }
+        _ => String::new(),
+    };
+    if !output::confirm(
+        &format!(
+            "This will archive model version {id} (\"{}\"){stored}",
+            m.summary()
+        ),
+        ctx.yes,
+    ) {
+        return Ok(());
+    }
+    let body = client.delete_value(&path).await?;
+    if ctx.json {
+        return output::json_out(&body);
+    }
+    match body.get("freedBytes").and_then(|b| b.as_u64()) {
+        Some(freed) => output::success(&format!(
+            "Model version {id} archived; its stored files are removed ({} freed).",
+            human_bytes(freed)
+        )),
+        None => output::success(&format!("Model version {id} archived.")),
+    }
     println!();
     Ok(())
 }
@@ -283,7 +530,7 @@ fn render_identity(m: &ModelVersionRow) {
         &deployment_indicator(m.deployment_status.as_deref().unwrap_or("unknown")),
     );
     if let Some(src) = &m.source_kind {
-        output::field("Source", src);
+        output::field("Source", source_label(src));
     }
     if let Some(uri) = &m.artifact_uri {
         output::field("Artifact", uri);

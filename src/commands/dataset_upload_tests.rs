@@ -1481,10 +1481,16 @@ async fn a_file_that_shrank_after_it_was_declared_stops_the_upload() {
     let opts = options(&data.0, &srv.state);
     let progress = Arc::new(Progress::new(&plan));
 
-    let err = send_missing(&srv.client, DS, &plan, &opts, &progress)
-        .await
-        .unwrap_err()
-        .to_string();
+    let err = send_missing(
+        &srv.client,
+        &upload_base(DS),
+        &plan,
+        &opts.send(),
+        &progress,
+    )
+    .await
+    .unwrap_err()
+    .to_string();
 
     assert!(
         err.contains("shorter than when the upload was declared"),
