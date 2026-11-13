@@ -145,6 +145,9 @@ written against it and nothing else. What must stay true when touching it:
 - **`datasets verify` reads the directory by the same `ScanRules`** and compares it
   with `GET /datasets/:id/files` (path, size, SHA-256 where listed) without fetching a
   file. Any difference, in either direction, is a non-zero exit: it gates an `rm -rf`.
+  A dataset that is not `ready` is a non-zero exit as well, files matching or not.
+- **Nothing is left out silently, in any output mode.** Human output lists the
+  left-out entries under `Left out`; `--json` prints the same list on stderr.
 - **Never hold a part in memory.** A part is hashed in one pass over the file range and
   streamed from disk in a second (`reqwest::Body::wrap_stream`). Memory must not grow
   with file size, `--chunk-size` or `--parallel`. `Content-Length` is set by hand — a

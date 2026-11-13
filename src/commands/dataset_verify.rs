@@ -16,7 +16,9 @@
 //!
 //! Any difference is a non-zero exit, and so is a file the instance holds
 //! that the directory does not: after this command succeeds, download followed
-//! by `diff -r` is empty.
+//! by `diff -r` is empty. A dataset that is not `ready` (still validating, or
+//! failed) is a non-zero exit too, even when every file matches: the exit code
+//! gates an `rm -rf`, and "failed" is not a state to delete the only copy on.
 
 use super::dataset_download::{Kind, fetch_manifest};
 use super::dataset_upload::{
@@ -93,6 +95,9 @@ pub struct Difference {
 /// what `--json` prints.
 #[derive(Debug)]
 pub struct VerifyOutcome {
+    /// The dataset's status on the instance; only `ready` lets the command
+    /// succeed.
+    pub status: String,
     pub local_files: usize,
     pub local_bytes: u64,
     pub remote_files: usize,
@@ -116,8 +121,18 @@ impl VerifyOutcome {
 /// code can gate an `rm -rf`.
 pub async fn run_verify(client: &ApiClient, ctx: &Ctx, opts: VerifyOptions) -> RmsResult<()> {
     let outcome = verify(client, ctx, &opts).await?;
-    if outcome.matches() {
+    if outcome.matches() && outcome.status == "ready" {
         return Ok(());
+    }
+    if outcome.matches() {
+        return Err(RmsError::Other(format!(
+            "the files of {} match dataset {}, but the dataset is '{}', not ready — \
+             do not delete the local copy until it is (rmsctl datasets show {})",
+            opts.dir.display(),
+            opts.id,
+            outcome.status,
+            opts.id
+        )));
     }
     Err(RmsError::Other(format!(
         "{} does not match dataset {}: {} difference(s) — do not delete the local copy",
@@ -291,6 +306,7 @@ pub async fn verify(
     differences.sort_by(|a, b| a.path.cmp(&b.path));
 
     let outcome = VerifyOutcome {
+        status: status.clone(),
         local_files: scan.files.len(),
         local_bytes: scan.total_bytes(),
         remote_files: manifest.files.len(),
@@ -311,6 +327,7 @@ pub async fn verify(
             "status": status,
             "dir": root.display().to_string(),
             "match": outcome.matches(),
+            "ready": status == "ready",
             "localFiles": outcome.local_files,
             "localBytes": outcome.local_bytes,
             "remoteFiles": outcome.remote_files,
@@ -355,7 +372,7 @@ pub async fn verify(
 
     if status != "ready" {
         output::warn(&format!(
-            "The dataset is {status}, not ready — its files were compared as they are stored."
+            "The dataset is {status}, not ready — its files were compared as they are stored, but this command fails until it is ready."
         ));
     }
     if outcome.matches() {

@@ -252,6 +252,37 @@ async fn a_dataset_uploaded_before_every_file_was_stored_fails_on_its_readme() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_dataset_that_is_not_ready_fails_the_command_even_when_every_file_matches() {
+    // Stored and identical, but the server's verdict on it is "failed": the
+    // exit code gates an `rm -rf`, so it must not be 0.
+    let mut mock = stored();
+    mock.status = Some("failed".into());
+    let dir = local_copy(&mock, "verify-not-ready");
+    let s = server(mock).await;
+
+    let outcome = verify(&s.client, &ctx(), &options(&dir.0)).await.unwrap();
+    assert!(outcome.matches());
+    assert_eq!(outcome.status, "failed");
+
+    let err = run_verify(&s.client, &ctx(), options(&dir.0))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("'failed', not ready"), "{err}");
+    assert!(err.contains("do not delete"), "{err}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_ready_dataset_that_matches_succeeds() {
+    let mock = stored();
+    let dir = local_copy(&mock, "verify-ready");
+    let s = server(mock).await;
+    run_verify(&s.client, &ctx(), options(&dir.0))
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_wrong_id_or_directory_is_an_error_not_a_match() {
     let mock = stored();
     let dir = local_copy(&mock, "verify-wrong");

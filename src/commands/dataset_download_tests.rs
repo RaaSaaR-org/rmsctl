@@ -161,6 +161,8 @@ pub(in crate::commands) struct Mock {
     pub(in crate::commands) extra_listing: Vec<(String, u64)>,
     /// List these files with a size they do not have.
     pub(in crate::commands) listed_size: HashMap<String, u64>,
+    /// The dataset's status; `None` is `ready`.
+    pub(in crate::commands) status: Option<String>,
     /// Answer the manifest like a server that predates the API.
     pub(in crate::commands) no_files_api: bool,
     /// `METHOD path [range]`, one line per request.
@@ -328,7 +330,7 @@ async fn serve_connection(
             let body = {
                 let mut m = mock.lock().unwrap();
                 m.log.push(format!("{method} dataset"));
-                json!({ "dataset": { "id": ID, "name": m.name, "status": "ready" } })
+                json!({ "dataset": { "id": ID, "name": m.name, "status": m.status.as_deref().unwrap_or("ready") } })
             };
             if !respond_json(&mut sock, 200, "", &body).await {
                 return;

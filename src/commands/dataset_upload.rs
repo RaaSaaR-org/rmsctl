@@ -911,6 +911,17 @@ pub(super) fn build_plan(
     })
 }
 
+/// The local files an upload's file list (fixed when it started) does not
+/// name — they are not on the instance, whatever the upload's state says.
+pub(super) fn not_declared<'a>(local: &'a [LocalFile], remote: &[RemoteFile]) -> Vec<&'a str> {
+    let declared: HashSet<&str> = remote.iter().map(|r| r.path.as_str()).collect();
+    local
+        .iter()
+        .map(|l| l.rel.as_str())
+        .filter(|rel| !declared.contains(rel))
+        .collect()
+}
+
 fn changed(what: String) -> RmsError {
     RmsError::InvalidInput(format!(
         "the directory no longer matches the upload: {what}.\n  \
@@ -1532,6 +1543,20 @@ pub async fn upload(
         }
     }
 
+    // --json keeps stdout for the result; what stays behind still has to be
+    // said, so it goes to stderr.
+    if ui.quiet && !scan.skipped.is_empty() {
+        eprintln!(
+            "rmsctl: {} entr{} of {} NOT uploaded:",
+            scan.skipped.len(),
+            if scan.skipped.len() == 1 { "y" } else { "ies" },
+            root.display()
+        );
+        for line in skipped_lines(&scan.skipped, usize::MAX) {
+            eprintln!("rmsctl:   {line}");
+        }
+    }
+
     // ── Is there an upload to carry on with? ────────────────────────────
     let explicit = opts.resume.is_some();
     let candidate = opts.resume.clone().or_else(|| {
@@ -1612,6 +1637,34 @@ pub async fn upload(
             "processing" | "completed" => {
                 ui.field("Resuming", &id);
                 ui.info("Every part is already stored; waiting for the server's verdict.");
+                // That upload's file list was fixed when it started — possibly
+                // by an older rmsctl that sent only the LeRobot tree. A file
+                // that is here now and was not declared then is not on the
+                // instance, and "ready" below must not read as if it were.
+                let absent = not_declared(&scan.files, &status.files);
+                if !absent.is_empty() {
+                    let message = format!(
+                        "{} file(s) of this directory are NOT part of upload {id} and are not on the instance: {}{}.\n      \
+                         Check with: rmsctl datasets verify {id} {}",
+                        absent.len(),
+                        absent
+                            .iter()
+                            .take(8)
+                            .copied()
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                        match absent.len().saturating_sub(8) {
+                            0 => String::new(),
+                            n => format!(" and {n} more"),
+                        },
+                        root.display()
+                    );
+                    if ui.quiet {
+                        eprintln!("rmsctl: {message}");
+                    } else {
+                        ui.warn(&message);
+                    }
+                }
                 let _ = ACTIVE_UPLOAD.set(id.clone());
                 return conclude(client, ctx, &ui, opts, &store, &id, 0, 0).await;
             }

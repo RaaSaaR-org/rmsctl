@@ -228,8 +228,14 @@ ein Datensatz im Modus `metadata`.
 | leere Verzeichnisse, Sockets, Pipes | es werden Dateien gespeichert, keine Verzeichnisse |
 
 Nichts davon faellt still weg: Der Lauf ohne `--yes` listet jeden ausgelassenen Eintrag
-mit Grund (`Left out`), der Lauf mit `--yes` die ersten zwoelf und die Anzahl. Ein
+mit Grund (`Left out`), der Lauf mit `--yes` die ersten zwoelf und die Anzahl; mit
+`--json` steht die vollstaendige Liste auf stderr (stdout bleibt das JSON). Ein
 Verzeichnis-Eintrag (`raw/`) steht fuer alles darunter.
+
+Wird ein bereits abgeschlossener Upload wieder aufgenommen (z. B. einer, den ein
+aelteres `rmsctl` nur mit dem LeRobot-Baum gestartet hat), nennt der Befehl die Dateien
+des Verzeichnisses, die nicht Teil dieses Uploads sind — sie liegen nicht auf der
+Instanz.
 
 **Symlinks** wird gefolgt (ein Hub-Cache-Snapshot besteht aus Links nach `blobs/`): Eine
 verlinkte Datei oder ein verlinktes Verzeichnis wird mit dem Inhalt des Ziels
@@ -325,8 +331,13 @@ Jede Abweichung wird genannt, und der Befehl endet mit Exit 1:
   `README.md` auf der Instanz — `verify` meldet sie als "missing on the instance".
 - **`--json`:** ein Objekt mit `match`, `localFiles`, `remoteFiles`, `sha256Compared`,
   `sizeOnly`, `differences[] { path, kind, detail }` und `leftOut[] { path, reason }`;
-  `kind` ist `missingOnInstance`, `onlyOnInstance`, `size`, `sha256` oder `noChecksum`.
-  Der Exit-Code ist derselbe.
+  `kind` ist `missingOnInstance`, `onlyOnInstance`, `size`, `sha256` oder `noChecksum`;
+  dazu `status` und `ready`. Der Exit-Code ist derselbe.
+- **Nur `ready` zaehlt:** Ist der Datensatz auf der Instanz nicht `ready` (noch in der
+  Validierung, oder `failed`), endet der Befehl mit Exit 1, auch wenn jede Datei
+  uebereinstimmt — auf einen fehlgeschlagenen Datensatz hin loescht man die lokale Kopie
+  nicht. Waehrend eines laufenden Uploads (`uploading`) gibt die Instanz gar keine
+  Dateiliste heraus; auch das ist Exit 1.
 - Der Befehl aendert nichts und braucht kein `--yes`. Server: braucht die Datei-API
   (RMS TASK-496).
 

@@ -693,6 +693,22 @@ struct MockFile {
     sha256: Option<String>,
 }
 
+#[test]
+fn files_an_upload_never_declared_are_named() {
+    let local = |rel: &str| LocalFile {
+        rel: rel.into(),
+        abs: PathBuf::from(rel),
+        size: 1,
+    };
+    let remote: Vec<RemoteFile> = serde_json::from_value(json!([
+        { "id": 0, "path": "meta/info.json", "size": 1, "partCount": 1 }
+    ]))
+    .unwrap();
+    let here = [local("README.md"), local("meta/info.json")];
+    assert_eq!(not_declared(&here, &remote), ["README.md"]);
+    assert!(not_declared(&here[1..], &remote).is_empty());
+}
+
 #[derive(Default)]
 struct Mock {
     chunk: u64,
