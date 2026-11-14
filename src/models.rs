@@ -86,8 +86,29 @@ impl Robot {
     pub fn floor(&self) -> Option<&str> {
         self.location.as_ref()?.get("floor")?.as_str()
     }
+    /// What to call a robot that is on the fleet but has never connected, or
+    /// `None` for every other robot.
+    ///
+    /// The server lists an expected robot (`PUT /robots/:id/expected`) as
+    /// `offline` with `metadata.provisioning` = `awaiting_agent` or `arriving`.
+    /// The web UI reads those as "Not connected" and "Arriving", never as
+    /// "Offline"; so does this. A robot that is not offline is connected,
+    /// whatever stale metadata says.
+    pub fn expected_label(&self) -> Option<&'static str> {
+        if self.status.as_deref() != Some("offline") {
+            return None;
+        }
+        match self.metadata.as_ref()?.get("provisioning")?.as_str()? {
+            "awaiting_agent" => Some("not connected"),
+            "arriving" => Some("arriving"),
+            _ => None,
+        }
+    }
     /// How a robot's state should be bucketed on the fleet dashboard.
     pub fn health(&self) -> RobotHealth {
+        if self.expected_label().is_some() {
+            return RobotHealth::Expected;
+        }
         match self
             .status
             .as_deref()
@@ -121,6 +142,9 @@ pub enum RobotHealth {
     Stopped,
     Error,
     Offline,
+    /// On the fleet, never connected yet — not an outage, and not part of the
+    /// fleet availability is measured over.
+    Expected,
     Other,
 }
 
@@ -208,6 +232,46 @@ mod tests {
 
     fn robot_with(status: &str) -> Robot {
         serde_json::from_value(serde_json::json!({ "id": "r1", "status": status })).unwrap()
+    }
+
+    fn expected_robot(status: &str, provisioning: &str) -> Robot {
+        serde_json::from_value(serde_json::json!({
+            "id": "r1",
+            "status": status,
+            "metadata": { "provisioning": provisioning, "plannedPlace": "STAGING" }
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn an_expected_robot_is_not_offline() {
+        let waiting = expected_robot("offline", "awaiting_agent");
+        assert_eq!(waiting.expected_label(), Some("not connected"));
+        assert_eq!(waiting.health(), RobotHealth::Expected);
+        assert!(!waiting.health().is_available());
+
+        let arriving = expected_robot("offline", "arriving");
+        assert_eq!(arriving.expected_label(), Some("arriving"));
+        assert_eq!(arriving.health(), RobotHealth::Expected);
+    }
+
+    #[test]
+    fn only_an_offline_robot_with_a_known_provisioning_state_is_expected() {
+        // Connected, with the metadata of its expected days still on the row.
+        let online = expected_robot("online", "awaiting_agent");
+        assert_eq!(online.expected_label(), None);
+        assert_eq!(online.health(), RobotHealth::Online);
+        // A state this build does not know stays what the server says: offline.
+        let unknown = expected_robot("offline", "decommissioned");
+        assert_eq!(unknown.expected_label(), None);
+        assert_eq!(unknown.health(), RobotHealth::Offline);
+        // No metadata at all, or a non-string value.
+        assert_eq!(robot_with("offline").expected_label(), None);
+        let odd: Robot = serde_json::from_value(serde_json::json!({
+            "id": "r1", "status": "offline", "metadata": { "provisioning": true }
+        }))
+        .unwrap();
+        assert_eq!(odd.health(), RobotHealth::Offline);
     }
 
     /// The fleet dashboard folded every status it did not recognise into

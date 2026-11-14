@@ -828,7 +828,10 @@ pub enum ModelsCommand {
     /// Cancel a model upload and delete what was stored
     UploadCancel { id: String },
     /// List the files the instance stores for a model
-    Files { id: String },
+    Files {
+        /// Model version ID
+        id: String,
+    },
     /// Download an uploaded model's files as the directory they were stored as
     ///
     /// Same relative paths, same bytes, straight from the instance's storage.

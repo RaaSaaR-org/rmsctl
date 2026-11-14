@@ -289,6 +289,17 @@ struct Buckets {
     /// predates (e.g. `maintenance`) is named instead of just counted.
     other_labels: Vec<String>,
     available: usize,
+    /// On the fleet, never connected yet (`Robot::expected_label`).
+    expected: usize,
+}
+
+impl Buckets {
+    /// The robots availability is measured over: every robot that has
+    /// connected at least once. An expected robot cannot be unavailable — it
+    /// was never there.
+    fn connected(&self, total: usize) -> usize {
+        total.saturating_sub(self.expected)
+    }
 }
 
 /// Bucket a robot, letting a latched E-stop override the roster's status.
@@ -309,6 +320,7 @@ fn tally(robots: &[Robot], latched_ids: &HashSet<&str>) -> Buckets {
             RobotHealth::Stopped => b.stopped += 1,
             RobotHealth::Error => b.error += 1,
             RobotHealth::Offline => b.offline += 1,
+            RobotHealth::Expected => b.expected += 1,
             RobotHealth::Other => {
                 b.other += 1;
                 let raw = r.status.clone().unwrap_or_else(|| "unknown".to_string());
@@ -362,6 +374,11 @@ fn render_fleet(robots: &[Robot], latched_ids: &HashSet<&str>, safety: &RmsResul
         &b.offline.to_string(),
         dim_if(b.offline, "yellow"),
     );
+    // Only when there are any: most fleets have none, and the web UI names
+    // them "Not connected" / "Arriving" rather than "Offline".
+    if b.expected > 0 {
+        output::stat_line("○", "Expected", &b.expected.to_string(), "dim");
+    }
     output::stat_line(
         "○",
         "Other",
@@ -396,12 +413,15 @@ fn render_fleet(robots: &[Robot], latched_ids: &HashSet<&str>, safety: &RmsResul
     }
     // Availability counts the reachable, unlatched fleet — a stopped robot is
     // not available however healthy its roster entry looks.
-    output::meter(
-        "Availability",
-        b.available as f64,
-        total as f64,
-        availability_color(b.available, total),
-    );
+    let connected = b.connected(total);
+    if connected > 0 {
+        output::meter(
+            "Availability",
+            b.available as f64,
+            connected as f64,
+            availability_color(b.available, connected),
+        );
+    }
 
     let batteries: Vec<f64> = robots.iter().filter_map(|r| r.battery_level).collect();
     if !batteries.is_empty() {
@@ -410,12 +430,16 @@ fn render_fleet(robots: &[Robot], latched_ids: &HashSet<&str>, safety: &RmsResul
     }
 
     // A 0%-filled bar has no colour to show, so the outage also gets words.
-    if total > 0 && (b.available as f64) / (total as f64) < 0.5 {
+    if let Some(msg) = availability_warning(b.available, connected) {
         println!();
-        output::warn(&match b.available {
-            0 => format!("no robot of {total} is available for work."),
-            n => format!("only {n} of {total} robot(s) available for work."),
-        });
+        output::warn(&msg);
+    }
+    if b.expected > 0 {
+        println!();
+        output::info(&format!(
+            "{} robot(s) expected, not connected yet — not counted in availability.",
+            b.expected
+        ));
     }
 
     if b.other > 0 && !b.other_labels.is_empty() {
@@ -430,6 +454,19 @@ fn render_fleet(robots: &[Robot], latched_ids: &HashSet<&str>, safety: &RmsResul
 
 fn dim_if(count: usize, color: &'static str) -> &'static str {
     if count > 0 { color } else { "dim" }
+}
+
+/// The outage in words, when fewer than half of the connected robots are
+/// available — a 0%-filled bar has no colour to show. `connected` leaves out
+/// the robots that are only expected.
+fn availability_warning(available: usize, connected: usize) -> Option<String> {
+    if connected == 0 || (available as f64) / (connected as f64) >= 0.5 {
+        return None;
+    }
+    Some(match available {
+        0 => format!("no robot of {connected} is available for work."),
+        n => format!("only {n} of {connected} robot(s) available for work."),
+    })
 }
 
 /// Threshold colouring, so a fully down fleet reads red rather than amber.
@@ -515,9 +552,15 @@ fn render_units(robots: &[Robot], latched_ids: &HashSet<&str>) {
     }
 
     output::section("◈", "Registered Units");
+    let name_w = output::flex_width(
+        20,
+        output::fixed_width(&[output::ID_W, 20, 5, 14, 17]),
+        output::longest(robots.iter().filter_map(|r| r.name.as_deref())),
+        output::term_width(),
+    );
     output::table_header(&[
         ("ID", output::ID_W),
-        ("NAME", 20),
+        ("NAME", name_w),
         ("STATUS", 20),
         ("BATT", 5),
         ("ZONE", 14),
@@ -529,7 +572,7 @@ fn render_units(robots: &[Robot], latched_ids: &HashSet<&str>) {
         let status = if latched_ids.contains(r.id.as_str()) {
             format!("■ {}", "E-STOP".red().bold())
         } else {
-            output::status_indicator(r.status.as_deref().unwrap_or("unknown"))
+            output::robot_status(r.status.as_deref().unwrap_or("unknown"), r.expected_label())
         };
         let batt = match r.battery_level {
             Some(b) => format!("{b:.0}%"),
@@ -538,7 +581,7 @@ fn render_units(robots: &[Robot], latched_ids: &HashSet<&str>) {
         println!(
             "    {} {} {} {} {} {}",
             output::pad(&r.id, output::ID_W),
-            output::pad(&output::truncate(name, 20), 20),
+            output::pad(&output::truncate(name, name_w), name_w),
             output::pad(&status, 20),
             output::pad(&batt, 5),
             output::pad(&output::truncate(r.zone().unwrap_or("-"), 14), 14),
@@ -586,5 +629,73 @@ fn short_time(ts: &str) -> String {
             format!("{date} {hm}")
         }
         _ => ts.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn robot(id: &str, status: &str, provisioning: Option<&str>) -> Robot {
+        let mut v = serde_json::json!({ "id": id, "status": status });
+        if let Some(p) = provisioning {
+            v["metadata"] = serde_json::json!({ "provisioning": p });
+        }
+        serde_json::from_value(v).unwrap()
+    }
+
+    /// The demo fleet: one robot online, three seeded as expected. The old
+    /// tally read that as "Offline 3, availability 25 %, only 1 of 4".
+    #[test]
+    fn expected_robots_are_neither_offline_nor_unavailable() {
+        let robots = [
+            robot("a", "online", None),
+            robot("b", "offline", Some("arriving")),
+            robot("c", "offline", Some("awaiting_agent")),
+            robot("d", "offline", Some("awaiting_agent")),
+        ];
+        let b = tally(&robots, &HashSet::new());
+        assert_eq!((b.online, b.offline, b.expected), (1, 0, 3));
+        assert_eq!(b.available, 1);
+        assert_eq!(b.connected(robots.len()), 1);
+        assert_eq!(
+            availability_warning(b.available, b.connected(robots.len())),
+            None
+        );
+    }
+
+    #[test]
+    fn a_robot_that_dropped_out_still_counts_against_availability() {
+        let robots = [
+            robot("a", "online", None),
+            robot("b", "offline", None),
+            robot("c", "offline", None),
+            robot("d", "offline", Some("arriving")),
+        ];
+        let b = tally(&robots, &HashSet::new());
+        assert_eq!((b.online, b.offline, b.expected), (1, 2, 1));
+        assert_eq!(b.connected(robots.len()), 3);
+        assert_eq!(
+            availability_warning(b.available, 3).as_deref(),
+            Some("only 1 of 3 robot(s) available for work.")
+        );
+    }
+
+    #[test]
+    fn a_latched_stop_overrides_expected() {
+        let robots = [robot("a", "offline", Some("awaiting_agent"))];
+        let b = tally(&robots, &HashSet::from(["a"]));
+        assert_eq!((b.stopped, b.expected), (1, 0));
+    }
+
+    #[test]
+    fn availability_warning_words() {
+        assert_eq!(
+            availability_warning(0, 2).as_deref(),
+            Some("no robot of 2 is available for work.")
+        );
+        assert_eq!(availability_warning(1, 2), None);
+        // A fleet of expected robots only: nothing to be unavailable.
+        assert_eq!(availability_warning(0, 0), None);
     }
 }

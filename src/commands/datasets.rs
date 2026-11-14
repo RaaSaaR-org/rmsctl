@@ -593,10 +593,17 @@ async fn list(client: &ApiClient, ctx: &Ctx) -> RmsResult<()> {
         return Ok(());
     }
 
+    // NAME grows with the terminal; the other columns keep their widths.
+    let name_w = output::flex_width(
+        26,
+        output::fixed_width(&[output::ID_W, 13, 12, 9, 11, 7]),
+        output::longest(resp.datasets.iter().map(|d| d.label())),
+        output::term_width(),
+    );
     output::table_header(&[
         ("ID", output::ID_W),
         ("KIND", 13),
-        ("NAME", 26),
+        ("NAME", name_w),
         ("STATUS", 12),
         ("EPISODES", 9),
         ("FRAMES", 11),
@@ -608,7 +615,7 @@ async fn list(client: &ApiClient, ctx: &Ctx) -> RmsResult<()> {
             "    {} {} {} {} {} {} {}",
             output::pad(&d.id, output::ID_W),
             output::pad(&kind_label(d.kind.as_deref()).to_string(), 13),
-            output::pad(&output::truncate(d.label(), 26), 26),
+            output::pad(&output::truncate(d.label(), name_w), name_w),
             output::pad(
                 &dataset_status(d.status.as_deref().unwrap_or("unknown")),
                 12

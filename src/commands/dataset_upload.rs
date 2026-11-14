@@ -981,17 +981,22 @@ impl Progress {
     }
 }
 
-/// `1.2 GB`-style size, decimal units like the dataset pages show.
+/// `6.4 GB`-style size, written the way the web UI writes it: divided by
+/// 1024 per step and labelled B / KB / MB / GB / TB, one decimal below 100 and
+/// none from 100 up (`formatBytes` and `formatArtifactSize` in the app). The
+/// same model or dataset must read the same in the terminal and in the browser.
 pub fn human_bytes(n: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "kB", "MB", "GB", "TB"];
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
     let mut v = n as f64;
     let mut unit = 0;
-    while v >= 1000.0 && unit < UNITS.len() - 1 {
-        v /= 1000.0;
+    while v >= 1024.0 && unit < UNITS.len() - 1 {
+        v /= 1024.0;
         unit += 1;
     }
     if unit == 0 {
         format!("{n} B")
+    } else if v >= 100.0 {
+        format!("{v:.0} {}", UNITS[unit])
     } else {
         format!("{v:.1} {}", UNITS[unit])
     }

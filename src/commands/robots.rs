@@ -254,26 +254,35 @@ async fn list(client: &ApiClient, ctx: &Ctx) -> RmsResult<()> {
         output::info("GET /robots returns the whole fleet — --page/--limit are ignored here.");
     }
 
+    // NAME grows with the terminal; the other columns keep their widths. ID is
+    // the last column and is not padded, so it takes what the longest id does.
+    let id_w = output::longest(resp.robots.iter().map(|r| r.id.as_str()));
+    let name_w = output::flex_width(
+        16,
+        output::fixed_width(&[17, 5, 13, 14, id_w]),
+        output::longest(resp.robots.iter().filter_map(|r| r.name.as_deref())),
+        output::term_width(),
+    );
     output::table_header(&[
-        ("NAME", 16),
+        ("NAME", name_w),
         ("STATUS", 17),
         ("BATT", 5),
         ("ZONE", 13),
         ("TASK", 14),
-        ("ID", output::ID_W),
+        ("ID", id_w.max(2)),
     ]);
 
     for r in &resp.robots {
         println!(
             "    {} {} {} {} {} {}",
             output::pad(
-                &output::truncate(r.name.as_deref().unwrap_or("-"), 16)
+                &output::truncate(r.name.as_deref().unwrap_or("-"), name_w)
                     .bold()
                     .to_string(),
-                16
+                name_w
             ),
             output::pad(
-                &output::status_indicator(r.status.as_deref().unwrap_or("unknown")),
+                &output::robot_status(r.status.as_deref().unwrap_or("unknown"), r.expected_label()),
                 17
             ),
             output::pad(&battery_cell(r.battery_level), 5),
@@ -328,7 +337,7 @@ async fn show(client: &ApiClient, ctx: &Ctx, id: &str) -> RmsResult<()> {
         output::field("Serial", v);
     }
     if let Some(v) = &robot.status {
-        output::field("Status", &output::status_indicator(v));
+        output::field("Status", &output::robot_status(v, robot.expected_label()));
     }
     // The most operationally interesting field on a stopped robot: a
     // protective stop reports itself here and nowhere else on the entity.

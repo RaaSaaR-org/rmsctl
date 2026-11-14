@@ -250,6 +250,12 @@ must never count toward availability — the pre-audit dashboard folded every un
 status into "Other" and computed availability as `online / total`, so a fleet with a
 latched E-stop read as merely idle.
 
+An expected robot — `offline` with `metadata.provisioning` = `awaiting_agent` or
+`arriving`, the rule the web UI uses — reads "not connected" / "arriving"
+(`Robot::expected_label`) and is left out of the availability denominator. Only that
+exact pair qualifies: the server drops the key when an agent registers, so a robot that
+dropped out stays `offline` and counts. A latched E-stop still wins over it.
+
 ## NeoDEM Server
 
 The CLI talks to the NeoDEM server REST API (default port 3001). Start the server:
