@@ -15,8 +15,19 @@ use std::time::Duration;
 pub async fn run(cmd: &DatasetsCommand, client: &ApiClient, ctx: &Ctx) -> RmsResult<()> {
     match cmd {
         DatasetsCommand::List => list(client, ctx).await,
-        DatasetsCommand::Show { id } => show(client, ctx, id).await,
-        DatasetsCommand::Episodes { id } => episodes(client, ctx, id).await,
+        DatasetsCommand::Show { id } => show(client, ctx, &resolve_id(client, id).await?).await,
+        DatasetsCommand::Episodes { id } => {
+            episodes(client, ctx, &resolve_id(client, id).await?).await
+        }
+        DatasetsCommand::Files { id } => {
+            dataset_download::files(
+                client,
+                ctx,
+                dataset_download::Kind::Dataset,
+                &resolve_id(client, id).await?,
+            )
+            .await
+        }
         DatasetsCommand::Quality { id } => quality(client, ctx, id).await,
         DatasetsCommand::Stats { id } => stats(client, ctx, id).await,
         DatasetsCommand::Validate { id, advanced } => validate(client, ctx, id, *advanced).await,
@@ -71,6 +82,7 @@ pub async fn run(cmd: &DatasetsCommand, client: &ApiClient, ctx: &Ctx) -> RmsRes
         DatasetsCommand::Download {
             id,
             out,
+            include,
             parallel,
             retries,
             resume,
@@ -80,8 +92,9 @@ pub async fn run(cmd: &DatasetsCommand, client: &ApiClient, ctx: &Ctx) -> RmsRes
         } => {
             let opts = dataset_download::DownloadOptions {
                 kind: dataset_download::Kind::Dataset,
-                id: id.clone(),
+                id: resolve_id(client, id).await?,
                 out: out.clone(),
+                include: include.clone(),
                 parallel: *parallel as usize,
                 retries: *retries,
                 resume: *resume,
@@ -593,28 +606,52 @@ async fn list(client: &ApiClient, ctx: &Ctx) -> RmsResult<()> {
         return Ok(());
     }
 
-    // NAME grows with the terminal; the other columns keep their widths.
-    let name_w = output::flex_width(
-        26,
-        output::fixed_width(&[output::ID_W, 13, 12, 9, 11, 7]),
-        output::longest(resp.datasets.iter().map(|d| d.label())),
-        output::term_width(),
+    // NAME grows with the terminal; the other columns keep their widths. On a
+    // terminal the full table does not fit, ids are cut to 8 characters (the
+    // commands that take an id resolve that prefix) and KIND is left out when
+    // every row has the same one, which the footer then names.
+    let term = output::term_width();
+    let layout = list_layout(
+        term,
+        resp.datasets.iter().map(|d| d.kind.as_deref()).collect(),
     );
-    output::table_header(&[
-        ("ID", output::ID_W),
-        ("KIND", 13),
+    let mut others = vec![layout.id_w];
+    if layout.kind_column {
+        others.push(13);
+    }
+    others.extend([12, 9, 11, 7]);
+    let name_w = output::flex_width(
+        layout.name_min,
+        output::fixed_width(&others),
+        output::longest(resp.datasets.iter().map(|d| d.label())),
+        term,
+    );
+    let mut columns = vec![("ID", layout.id_w)];
+    if layout.kind_column {
+        columns.push(("KIND", 13));
+    }
+    columns.extend([
         ("NAME", name_w),
         ("STATUS", 12),
         ("EPISODES", 9),
         ("FRAMES", 11),
         ("QUALITY", 7),
     ]);
+    output::table_header(&columns);
 
     for d in &resp.datasets {
+        let kind = if layout.kind_column {
+            format!(
+                "{} ",
+                output::pad(&kind_label(d.kind.as_deref()).to_string(), 13)
+            )
+        } else {
+            String::new()
+        };
         println!(
-            "    {} {} {} {} {} {} {}",
-            output::pad(&d.id, output::ID_W),
-            output::pad(&kind_label(d.kind.as_deref()).to_string(), 13),
+            "    {} {}{} {} {} {} {}",
+            output::pad(&output::id_cell(&d.id, layout.id_w), layout.id_w),
+            kind,
             output::pad(&output::truncate(d.label(), name_w), name_w),
             output::pad(
                 &dataset_status(d.status.as_deref().unwrap_or("unknown")),
@@ -641,6 +678,7 @@ async fn list(client: &ApiClient, ctx: &Ctx) -> RmsResult<()> {
                 .as_deref()
                 .or_else(|| d.parent.as_ref().and_then(|p| p.id.as_deref()))
                 .unwrap_or("-");
+            let pid = output::id_cell(pid, layout.id_w);
             println!(
                 "    {} {}",
                 "└".bright_black(),
@@ -662,8 +700,128 @@ async fn list(client: &ApiClient, ctx: &Ctx) -> RmsResult<()> {
             "{views} of these are views — a view owns no bytes, only a selection of its parent's episodes."
         ));
     }
+    for note in layout.notes(resp.datasets.first().and_then(|d| d.kind.as_deref())) {
+        output::info(&note);
+    }
     println!();
     Ok(())
+}
+
+/// How `datasets list` fits the terminal.
+#[derive(Debug, PartialEq)]
+struct ListLayout {
+    id_w: usize,
+    kind_column: bool,
+    name_min: usize,
+}
+
+impl ListLayout {
+    /// What the footer has to say about what the narrow table left out, one
+    /// short line each so the footer does not wrap where the table did not.
+    fn notes(&self, kind: Option<&str>) -> Vec<String> {
+        let mut notes = Vec::new();
+        if self.id_w < 36 {
+            notes.push(format!(
+                "IDs cut to {} characters; show, episodes, files and download take them.",
+                output::SHORT_ID_W
+            ));
+        }
+        if !self.kind_column {
+            notes.push(format!(
+                "KIND left out: every row is {}.",
+                kind.unwrap_or("-")
+            ));
+        }
+        notes
+    }
+}
+
+/// The full table (36-character ids, KIND) whenever it fits or there is no
+/// terminal; otherwise short ids, a narrower NAME minimum, and no KIND column
+/// when every row has the same kind.
+fn list_layout(term: Option<usize>, kinds: Vec<Option<&str>>) -> ListLayout {
+    let full = output::fixed_width(&[output::ID_W, 13, 12, 9, 11, 7]);
+    if !output::too_narrow(full, 26, term) {
+        return ListLayout {
+            id_w: output::ID_W,
+            kind_column: true,
+            name_min: 26,
+        };
+    }
+    let same_kind = kinds.windows(2).all(|w| w[0] == w[1]);
+    ListLayout {
+        id_w: output::SHORT_ID_W,
+        kind_column: !same_kind,
+        name_min: output::NARROW_NAME_MIN,
+    }
+}
+
+/// Rows asked for per page when a short id is looked up in the listing.
+const RESOLVE_PAGE: u32 = 200;
+
+/// `ident` as a full dataset id.
+///
+/// The server looks a dataset up by its whole id only, so `datasets list`'s
+/// short ids would 404. An argument of 8 or more hex characters that is not a
+/// whole UUID is matched against the ids of every listed dataset (views
+/// included); anything else goes to the server as typed. A prefix that matches
+/// no id, or more than one, is refused with the candidates.
+pub(super) async fn resolve_id(client: &ApiClient, ident: &str) -> RmsResult<String> {
+    if !output::is_id_prefix(ident) {
+        return Ok(ident.to_string());
+    }
+    let mut rows: Vec<(String, String)> = Vec::new();
+    let mut page = 1u32;
+    loop {
+        let query = [
+            ("page", page.to_string()),
+            ("limit", RESOLVE_PAGE.to_string()),
+        ];
+        let resp: DatasetsResponse = client.get_query("/datasets", &query).await?;
+        let got = resp.datasets.len();
+        rows.extend(
+            resp.datasets
+                .iter()
+                .map(|d| (d.id.clone(), d.label().to_string())),
+        );
+        let pages = resp
+            .pagination
+            .as_ref()
+            .and_then(|p| p.total_pages())
+            .unwrap_or(1);
+        // A page cap: a listing that never ends must not loop forever.
+        if got == 0 || page >= pages || page >= 100 {
+            break;
+        }
+        page += 1;
+    }
+    match_prefix(&rows, ident)
+}
+
+fn match_prefix(rows: &[(String, String)], ident: &str) -> RmsResult<String> {
+    output::match_id_prefix(rows.iter().map(|(id, _)| id.as_str()), ident).map_err(|hits| {
+        if hits.is_empty() {
+            return RmsError::InvalidInput(format!(
+                "no dataset id starts with '{ident}' — see 'rmsctl datasets list'"
+            ));
+        }
+        let candidates = hits
+            .iter()
+            .map(|id| {
+                let name = rows
+                    .iter()
+                    .find(|(rid, _)| rid == id)
+                    .map(|(_, n)| n.as_str())
+                    .unwrap_or("-");
+                format!("{id} ({name})")
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        RmsError::InvalidInput(format!(
+            "'{ident}' is the start of {} dataset ids — pass more of the id: {candidates}",
+            hits.len()
+        ))
+    })
 }
 
 // ── show ────────────────────────────────────────────────────────────────
@@ -1569,4 +1727,91 @@ async fn flag(
     ));
     println!();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const KINDS: [Option<&str>; 4] = [Some("materialized"); 4];
+
+    #[test]
+    fn the_full_table_stays_without_a_terminal_and_on_a_wide_one() {
+        let full = ListLayout {
+            id_w: output::ID_W,
+            kind_column: true,
+            name_min: 26,
+        };
+        assert_eq!(list_layout(None, KINDS.to_vec()), full);
+        assert_eq!(list_layout(Some(200), KINDS.to_vec()), full);
+        assert!(full.notes(Some("materialized")).is_empty());
+    }
+
+    #[test]
+    fn a_narrow_terminal_gets_short_ids_and_no_kind_column_when_all_kinds_match() {
+        for term in [80, 120] {
+            let l = list_layout(Some(term), KINDS.to_vec());
+            assert_eq!(l.id_w, output::SHORT_ID_W);
+            assert!(!l.kind_column);
+            // The row fits: the other columns, one spare, and NAME's minimum.
+            let fixed = output::fixed_width(&[l.id_w, 12, 9, 11, 7]);
+            assert!(fixed + 1 + l.name_min <= term, "{term}: {fixed}");
+            let notes = l.notes(Some("materialized"));
+            assert_eq!(notes.len(), 2);
+            assert!(notes[0].contains("IDs cut to 8 characters"), "{notes:?}");
+            assert_eq!(notes[1], "KIND left out: every row is materialized.");
+            // "  [--] " plus the note fits the narrowest terminal checked.
+            assert!(
+                notes.iter().all(|n| 7 + n.chars().count() <= 80),
+                "{notes:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_narrow_terminal_keeps_kind_when_views_are_listed() {
+        let l = list_layout(Some(120), vec![Some("materialized"), Some("view")]);
+        assert_eq!(l.id_w, output::SHORT_ID_W);
+        assert!(l.kind_column);
+        assert_eq!(l.notes(None).len(), 1);
+    }
+
+    fn listed() -> Vec<(String, String)> {
+        [
+            ("9923225e-9d0a-463f-b072-eeded251142a", "Bottle Sorting"),
+            ("9b7c63ca-fc76-4dd1-aed2-2dada9bdcb64", "GR00T reference"),
+            (
+                "9b7c63ca-1111-4dd1-aed2-2dada9bdcb64",
+                "GR00T reference (fork)",
+            ),
+        ]
+        .iter()
+        .map(|(i, n)| (i.to_string(), n.to_string()))
+        .collect()
+    }
+
+    #[test]
+    fn a_unique_prefix_resolves_to_the_whole_id() {
+        assert_eq!(
+            match_prefix(&listed(), "9923225e").unwrap(),
+            "9923225e-9d0a-463f-b072-eeded251142a"
+        );
+        assert_eq!(
+            match_prefix(&listed(), "9b7c63ca-fc").unwrap(),
+            "9b7c63ca-fc76-4dd1-aed2-2dada9bdcb64"
+        );
+    }
+
+    #[test]
+    fn an_ambiguous_or_unknown_prefix_is_refused_with_the_candidates() {
+        let e = match_prefix(&listed(), "9b7c63ca").unwrap_err().to_string();
+        assert!(e.contains("is the start of 2 dataset ids"), "{e}");
+        assert!(
+            e.contains("9b7c63ca-fc76-4dd1-aed2-2dada9bdcb64 (GR00T reference)"),
+            "{e}"
+        );
+        assert!(e.contains("(GR00T reference (fork))"), "{e}");
+        let e = match_prefix(&listed(), "deadbeef").unwrap_err().to_string();
+        assert!(e.contains("no dataset id starts with 'deadbeef'"), "{e}");
+    }
 }

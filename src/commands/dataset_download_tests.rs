@@ -509,6 +509,7 @@ fn options(out: &Path) -> DownloadOptions {
         kind: Kind::Dataset,
         id: ID.into(),
         out: Some(out.to_path_buf()),
+        include: Vec::new(),
         parallel: 4,
         retries: 3,
         resume: false,
@@ -623,6 +624,101 @@ async fn parallel_bounds_the_files_in_flight() {
         "saw {} at once",
         mock.max_in_flight
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn include_fetches_and_checks_only_the_matching_files() {
+    let s = server(Mock::tree()).await;
+    let out = Scratch::new("include");
+    let target = out.path("d");
+    let mut opts = options(&target);
+    // A directory pattern, a basename glob at any depth, an anchored path.
+    opts.include = vec!["videos".into(), "*.json".into(), "meta/episodes/*/*".into()];
+
+    let outcome = download(&s.client, &ctx(), &opts).await.unwrap();
+
+    assert_eq!(outcome.files, 3);
+    assert_eq!(outcome.bytes, 200_000 + 10 + 400);
+    assert_eq!(outcome.verified_sha256, 3);
+    let mut found = Vec::new();
+    collect(&target, &target, &mut found);
+    found.sort();
+    assert_eq!(
+        found,
+        [
+            "meta/episodes/chunk-000/file-000.parquet",
+            "meta/info.json",
+            VIDEO
+        ]
+    );
+    let mock = s.mock.lock().unwrap();
+    // The whole manifest is read; only the included files are asked for.
+    assert_eq!(
+        mock.log
+            .iter()
+            .filter(|l| l.starts_with("GET files"))
+            .count(),
+        3
+    );
+    assert!(mock.content_requests(DATA).is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn include_that_matches_nothing_is_refused_before_anything_is_written() {
+    let s = server(Mock::tree()).await;
+    let out = Scratch::new("include-none");
+    let target = out.path("d");
+    let mut opts = options(&target);
+    opts.include = vec!["*.bag".into()];
+
+    let err = download(&s.client, &ctx(), &opts).await.unwrap_err();
+
+    assert!(matches!(err, RmsError::InvalidInput(_)), "{err}");
+    let text = err.to_string();
+    assert!(text.contains("no file of the 5"), "{text}");
+    assert!(text.contains("rmsctl datasets files ds-1"), "{text}");
+    assert!(!target.exists(), "nothing was created");
+    let mock = s.mock.lock().unwrap();
+    assert!(mock.log.iter().all(|l| !l.starts_with("GET content")));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn datasets_files_reads_every_page_of_the_manifest() {
+    let s = server(Mock::tree()).await;
+    let text = Ctx {
+        json: false,
+        yes: false,
+        page: None,
+        limit: None,
+    };
+    files(&s.client, &text, Kind::Dataset, ID).await.unwrap();
+    // --json passes the server's first page through.
+    files(&s.client, &ctx(), Kind::Dataset, ID).await.unwrap();
+    let mock = s.mock.lock().unwrap();
+    let pages: Vec<&str> = mock
+        .log
+        .iter()
+        .filter(|l| l.starts_with("GET files"))
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        pages,
+        [
+            "GET files -",
+            "GET files meta/empty.jsonl",
+            "GET files meta/info.json",
+            "GET files -"
+        ]
+    );
+}
+
+#[test]
+fn the_files_table_keeps_its_width_when_piped_and_fits_a_terminal() {
+    assert_eq!(files_path_width(None, 80), 56);
+    // 80 columns: indent, SIZE, SHA-256, separators and one spare leave 49.
+    assert_eq!(files_path_width(Some(80), 55), 49);
+    assert_eq!(files_path_width(Some(200), 55), 55);
+    assert_eq!(files_path_width(Some(40), 55), 24);
 }
 
 #[test]

@@ -536,9 +536,15 @@ pub enum DatasetsCommand {
     /// List datasets
     List,
     /// Show dataset details
-    Show { id: String },
+    Show {
+        /// Dataset ID, or a unique prefix of 8 or more characters
+        id: String,
+    },
     /// List episodes in a dataset
-    Episodes { id: String },
+    Episodes {
+        /// Dataset ID, or a unique prefix of 8 or more characters
+        id: String,
+    },
     /// Quality report
     Quality { id: String },
     /// Dataset statistics
@@ -625,6 +631,11 @@ pub enum DatasetsCommand {
         #[arg(long, value_name = "SECS", default_value_t = 300)]
         part_timeout: u64,
     },
+    /// List the files the instance stores for a dataset
+    Files {
+        /// Dataset ID, or a unique prefix of 8 or more characters
+        id: String,
+    },
     /// Download a dataset from RMS as the LeRobot directory it is stored as
     ///
     /// Reproduces every stored file — meta/, data/, videos/, README.md … —
@@ -633,12 +644,19 @@ pub enum DatasetsCommand {
     /// Every file is checked against the size the server lists, and against
     /// its SHA-256 where the server has one (datasets that were uploaded with
     /// rmsctl). Unfinished files end in .rmsctl-part; --resume continues them.
+    /// With --include only the matching files are fetched and checked; a copy
+    /// made that way is partial, and `datasets verify` (which compares the
+    /// whole dataset) reports the files it lacks.
     Download {
-        /// Dataset ID
+        /// Dataset ID, or a unique prefix of 8 or more characters
         id: String,
         /// Directory to write the dataset into (default: ./<dataset name>)
         #[arg(long, short = 'o', value_name = "DIR")]
         out: Option<std::path::PathBuf>,
+        /// Fetch only the files matching this: meta/info.json, *.parquet,
+        /// videos (repeatable; same rules as upload's --exclude)
+        #[arg(long, value_name = "GLOB")]
+        include: Vec<String>,
         /// Files fetched at once
         #[arg(long, value_name = "N", default_value_t = 4, value_parser = clap::value_parser!(u8).range(1..=16))]
         parallel: u8,
@@ -746,7 +764,11 @@ pub enum ModelsCommand {
     /// List model versions
     List,
     /// Show a model version and its evaluation rollup
-    Show { id: String },
+    Show {
+        /// Model version ID, a unique prefix of 8 or more characters, or a
+        /// unique name or version
+        id: String,
+    },
     /// Show a model version's lineage
     Lineage { id: String },
     /// Compare the metrics of two model versions
@@ -829,7 +851,8 @@ pub enum ModelsCommand {
     UploadCancel { id: String },
     /// List the files the instance stores for a model
     Files {
-        /// Model version ID
+        /// Model version ID, a unique prefix of 8 or more characters, or a
+        /// unique name or version
         id: String,
     },
     /// Download an uploaded model's files as the directory they were stored as
@@ -839,7 +862,8 @@ pub enum ModelsCommand {
     /// its SHA-256 where the upload declared one (rmsctl does). Unfinished
     /// files end in .rmsctl-part; --resume continues them.
     Download {
-        /// Model version ID
+        /// Model version ID, a unique prefix of 8 or more characters, or a
+        /// unique name or version
         id: String,
         /// Directory to write the model into (default: ./<name>-<version>)
         #[arg(long, short = 'o', value_name = "DIR")]
