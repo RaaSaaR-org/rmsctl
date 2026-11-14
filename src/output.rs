@@ -291,8 +291,12 @@ pub const ID_W: usize = 38;
 
 /// Columns of the terminal stdout is attached to; `None` when it is a pipe or
 /// a file, where there is no width to fit.
+///
+/// Asks stdout only. `terminal_size::terminal_size()` falls back to stderr and
+/// stdin, so `rmsctl datasets list > file` typed in a terminal would lay the
+/// file out for that terminal's width.
 pub fn term_width() -> Option<usize> {
-    terminal_size::terminal_size().map(|(w, _)| usize::from(w.0))
+    terminal_size::terminal_size_of(std::io::stdout()).map(|(w, _)| usize::from(w.0))
 }
 
 /// Width for the one column of a list table that may grow — the name.
