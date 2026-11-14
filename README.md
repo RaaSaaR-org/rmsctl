@@ -198,13 +198,13 @@ rmsctl --server https://neodem.example/api datasets verify <dataset-id> /data/g1
   ◈ Upload: G1 Dex3 bottle sorting
     │ Source         /data/g1-dex3-bottle-sorting-sim
     │ Format         LeRobot v3.0 · unitree_g1_dex3 · 30 fps · 80 episodes
-    │ Files          9 (446.1 MB) — everything in the directory, 1 beside the LeRobot tree
+    │ Files          9 (425 MB) — everything in the directory, 1 beside the LeRobot tree
     │ Left out       2 entries — NOT uploaded:
       - .git/  (version-control data)
       - raw/  (--exclude raw)
   [OK] Upload started: dataset 3fb4173c-… (rustfs store, 32 MiB parts, 21 part(s))
-    │ Uploading      ████████░░░░░░░░░░░░  41.2%  183.8 MB / 446.1 MB · 6/9 files · 12.4 MB/s · ETA 21s
-  [OK] Sent 446.1 MB in 36s (12.4 MB/s)
+    │ Uploading      ████████░░░░░░░░░░░░  41.2%  175 MB / 425 MB · 6/9 files · 11.8 MB/s · ETA 21s
+  [OK] Sent 425 MB in 36s (11.8 MB/s)
   [--] The server is assembling the files and verifying checksums …
   [OK] Dataset ready
     │ ID             3fb4173c-81e8-4311-aa13-1b1970f886fc
@@ -297,18 +297,18 @@ werden einmal gelesen und gehasht.
   ◈ Verify: g1-dex3-bottle-sorting-sim
     │ Dataset        ca244af7-4182-422a-bd33-d55dfa7478b4
     │ Status         ready
-    │ Local          /data/g1-dex3-bottle-sorting-sim — 9 file(s), 446.1 MB
-    │ Instance       9 file(s), 446.1 MB · rustfs store
-  [--] Hashing 9 local file(s), 446.1 MB …
+    │ Local          /data/g1-dex3-bottle-sorting-sim — 9 file(s), 425 MB
+    │ Instance       9 file(s), 425 MB · rustfs store
+  [--] Hashing 9 local file(s), 425 MB …
     │ Compared       path and size of every file · SHA-256 of 9
-  [OK] Every one of the 9 file(s), 446.1 MB, is on the instance with the same path and size, and the same SHA-256 (9 files)
+  [OK] Every one of the 9 file(s), 425 MB, is on the instance with the same path and size, and the same SHA-256 (9 files)
 ```
 
 Jede Abweichung wird genannt, und der Befehl endet mit Exit 1:
 
 ```
   [!] 4 difference(s) between /data/g1-dex3-bottle-sorting-sim and the instance:
-      - only on the instance     README.md  (11.8 kB — not in the directory)
+      - only on the instance     README.md  (11.5 KB — not in the directory)
       - missing on the instance  calib/new.yaml  (4 B locally)
       - content differs          data/chunk-000/file-000.parquet  (same size, SHA-256 edb088808a05… locally, 55577747fa46… on the instance)
       - size differs             meta/stats.json  (36656 bytes locally, 36654 on the instance)
@@ -359,11 +359,11 @@ rmsctl --server https://neodem.example/api datasets download 6d5a0077-… --out 
     │ Dataset        6d5a0077-6b1f-4920-84a8-1c691903f8e0
     │ Status         ready
     │ Into           /data/g1-dex3-bottle-sorting-sim
-    │ Files          8 · 446.1 MB · from the rustfs store
+    │ Files          8 · 425 MB · from the rustfs store
     │ Verified by    size and SHA-256
-    │ Downloading    ████████░░░░░░░░░░░░  41.2%  183.8 MB / 446.1 MB · 6/8 files · 48.1 MB/s · ETA 5s
-  [OK] Downloaded 8 file(s), 446.1 MB into /data/g1-dex3-bottle-sorting-sim
-    │ Fetched        446.1 MB in 9s
+    │ Downloading    ████████░░░░░░░░░░░░  41.2%  175 MB / 425 MB · 6/8 files · 45.9 MB/s · ETA 5s
+  [OK] Downloaded 8 file(s), 425 MB into /data/g1-dex3-bottle-sorting-sim
+    │ Fetched        425 MB in 9s
     │ Verified       size of every file · SHA-256 of 8
 ```
 
@@ -466,13 +466,13 @@ rmsctl --server https://neodem.example/api models upload /data/runs/pipe_g11 \
   ◈ Upload model: GR00T N1.7 AppleToPlate g11 g11-step-5000
     │ Source         /data/runs/pipe_g11
     │ Base model     groot_n1_7
-    │ Files          15 (6.9 GB)
-    │                5.0 GB  model-00001-of-00002.safetensors
-    │                1.9 GB  model-00002-of-00002.safetensors
-  [--] Hashing 15 file(s), 6.9 GB, so the server can verify what it stored …
+    │ Files          15 (6.4 GB)
+    │                4.6 GB  model-00001-of-00002.safetensors
+    │                1.8 GB  model-00002-of-00002.safetensors
+  [--] Hashing 15 file(s), 6.4 GB, so the server can verify what it stored …
   [OK] Upload started: fe89db46-… (rustfs store, 32 MiB parts, 220 part(s))
-    │ Uploading      ████████░░░░░░░░░░░░  41.2%  2.8 GB / 6.9 GB · 9/15 files · 90.3 MB/s · ETA 45s
-  [OK] Sent 6.9 GB in 1m17s (90.3 MB/s)
+    │ Uploading      ████████░░░░░░░░░░░░  41.2%  2.6 GB / 6.4 GB · 9/15 files · 86.1 MB/s · ETA 45s
+  [OK] Sent 6.4 GB in 1m17s (86.1 MB/s)
   [--] The server is assembling the files and verifying checksums …
   [OK] Model registered
     │ ID             fe89db46-d44b-4edc-8794-cfe95facb611
@@ -480,7 +480,7 @@ rmsctl --server https://neodem.example/api models upload /data/runs/pipe_g11 \
     │ Artifact       s3://production-models/uploads/fe89db46-…/
     │ Base model     groot_n1_7
     │ Trained on     NVIDIA AppleToPlate (9b7c63ca-…)
-    │ Stored         6.9 GB in 15 file(s)
+    │ Stored         6.4 GB in 15 file(s)
 ```
 
 `<dir>` ist das Checkpoint-Verzeichnis (mit `config.json` und den Gewichten). Gesendet wird

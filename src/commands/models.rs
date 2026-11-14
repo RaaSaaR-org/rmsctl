@@ -325,9 +325,16 @@ async fn list(client: &ApiClient, ctx: &Ctx) -> RmsResult<()> {
         return Ok(());
     }
 
+    // NAME grows with the terminal; the other columns keep their widths.
+    let name_w = output::flex_width(
+        26,
+        output::fixed_width(&[output::ID_W, 14, 11, 9, 9, 14]),
+        output::longest(resp.model_versions.iter().filter_map(|m| m.name.as_deref())),
+        output::term_width(),
+    );
     output::table_header(&[
         ("ID", output::ID_W),
-        ("NAME", 26),
+        ("NAME", name_w),
         ("VERSION", 14),
         ("BASE", 11),
         ("SOURCE", 9),
@@ -338,7 +345,10 @@ async fn list(client: &ApiClient, ctx: &Ctx) -> RmsResult<()> {
         println!(
             "    {} {} {} {} {} {} {}",
             output::pad(&m.id, output::ID_W),
-            output::pad(&output::truncate(m.name.as_deref().unwrap_or("-"), 26), 26),
+            output::pad(
+                &output::truncate(m.name.as_deref().unwrap_or("-"), name_w),
+                name_w
+            ),
             output::pad(
                 &output::truncate(m.version.as_deref().unwrap_or("-"), 14),
                 14
@@ -421,7 +431,7 @@ fn render_detail(resp: &ModelVersionDetailResponse) {
     render_origin(resp);
 
     if let Some(e) = &resp.evaluation {
-        render_evaluation(e);
+        render_evaluation(e, has_metrics(m.validation_metrics.as_ref()));
     }
     render_metrics("Training metrics", m.training_metrics.as_ref());
     render_metrics("Validation metrics", m.validation_metrics.as_ref());
@@ -560,8 +570,36 @@ fn render_identity(m: &ModelVersionRow) {
     }
 }
 
-fn render_evaluation(e: &EvalRollup) {
+/// What to say in place of the rollup when this server ran no evaluation
+/// episode for the model, or `None` when it ran some.
+///
+/// The rollup counts evaluation episodes run on this server; the validation
+/// metrics are what came with the model. "Episodes 0 / Successes 0" printed
+/// above "eval_successes 26 of 50" reads as a contradiction, so a rollup of
+/// zeros is one line that says whose numbers are missing.
+fn no_evaluation_note(e: &EvalRollup, has_validation_metrics: bool) -> Option<&'static str> {
+    if e.episode_count.unwrap_or(0) > 0 {
+        return None;
+    }
+    Some(if has_validation_metrics {
+        "no evaluation runs recorded on this server — the validation metrics below came with the model"
+    } else {
+        "no evaluation runs recorded on this server"
+    })
+}
+
+fn has_metrics(metrics: Option<&Value>) -> bool {
+    metrics
+        .and_then(|v| v.as_object())
+        .is_some_and(|o| !o.is_empty())
+}
+
+fn render_evaluation(e: &EvalRollup, has_validation_metrics: bool) {
     output::subsection("Evaluation");
+    if let Some(note) = no_evaluation_note(e, has_validation_metrics) {
+        println!("    {} {}", "│".bright_black(), note.bright_black());
+        return;
+    }
     let episodes = e.episode_count.unwrap_or(0);
     output::field("Episodes", &episodes.to_string());
     output::field("Successes", &e.success_count.unwrap_or(0).to_string());
@@ -650,9 +688,15 @@ fn render_relations(m: &ModelVersionRow) {
 /// Shared table for the relation lists (children, ancestors) — every one of
 /// them is a full model-version row.
 fn render_row_table(rows: &[ModelVersionRow]) {
+    let name_w = output::flex_width(
+        26,
+        output::fixed_width(&[output::ID_W, 10, 14]),
+        output::longest(rows.iter().filter_map(|r| r.name.as_deref())),
+        output::term_width(),
+    );
     output::table_header(&[
         ("ID", output::ID_W),
-        ("NAME", 26),
+        ("NAME", name_w),
         ("VERSION", 10),
         ("STATUS", 14),
     ]);
@@ -660,7 +704,10 @@ fn render_row_table(rows: &[ModelVersionRow]) {
         println!(
             "    {} {} {} {}",
             output::pad(&r.id, output::ID_W),
-            output::pad(&output::truncate(r.name.as_deref().unwrap_or("-"), 26), 26),
+            output::pad(
+                &output::truncate(r.name.as_deref().unwrap_or("-"), name_w),
+                name_w
+            ),
             output::pad(
                 &output::truncate(r.version.as_deref().unwrap_or("-"), 10),
                 10
@@ -1123,4 +1170,44 @@ fn looks_like_uuid(s: &str) -> bool {
             8 | 13 | 18 | 23 => c == '-',
             _ => c.is_ascii_hexdigit(),
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn rollup(v: Value) -> EvalRollup {
+        serde_json::from_value(v).unwrap()
+    }
+
+    /// The uploaded model on the demo instance: the server ran no evaluation
+    /// episode, the upload stated 26 of 50.
+    #[test]
+    fn a_zero_rollup_is_one_line_that_does_not_contradict_the_validation_metrics() {
+        let zeros = rollup(json!({ "episodeCount": 0, "successCount": 0, "successRate": 0 }));
+        let stated = json!({ "eval_episodes": 50, "eval_successes": 26, "success_rate": 0.52 });
+        assert!(has_metrics(Some(&stated)));
+        let note = no_evaluation_note(&zeros, true).unwrap();
+        assert!(note.starts_with("no evaluation runs recorded on this server"));
+        assert!(note.contains("validation metrics below"));
+    }
+
+    #[test]
+    fn a_zero_rollup_without_validation_metrics_points_at_nothing() {
+        assert_eq!(
+            no_evaluation_note(&rollup(json!({})), false),
+            Some("no evaluation runs recorded on this server")
+        );
+        assert!(!has_metrics(None));
+        assert!(!has_metrics(Some(&json!({}))));
+        assert!(!has_metrics(Some(&Value::Null)));
+    }
+
+    #[test]
+    fn a_rollup_with_episodes_is_drawn_in_full() {
+        let some = rollup(json!({ "episodeCount": 20, "successCount": 15, "successRate": 0.75 }));
+        assert_eq!(no_evaluation_note(&some, true), None);
+        assert_eq!(no_evaluation_note(&some, false), None);
+    }
 }

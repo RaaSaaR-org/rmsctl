@@ -141,11 +141,20 @@ fn backoff_grows_respects_retry_after_and_is_capped() {
 fn sizes_and_durations_read_naturally() {
     assert_eq!(human_bytes(0), "0 B");
     assert_eq!(human_bytes(999), "999 B");
-    assert_eq!(human_bytes(1_500), "1.5 kB");
-    assert_eq!(human_bytes(446_100_000), "446.1 MB");
-    assert_eq!(human_bytes(3_500_000_000), "3.5 GB");
+    assert_eq!(human_bytes(1_023), "1023 B");
+    // The web UI's convention: divide by 1024, label KB / MB / GB / TB, one
+    // decimal below 100 and none from 100 up.
+    assert_eq!(human_bytes(1_024), "1.0 KB");
+    assert_eq!(human_bytes(1_536), "1.5 KB");
+    assert_eq!(human_bytes(446_100_000), "425 MB");
+    assert_eq!(human_bytes(3_500_000_000), "3.3 GB");
+    // The model the UI lists as "6.4 GB", and its two largest files.
+    assert_eq!(human_bytes(6_917_637_941), "6.4 GB");
+    assert_eq!(human_bytes(6_918_209_810), "6.4 GB");
+    assert_eq!(human_bytes(2 * 1024 * 1024 * 1024 * 1024), "2.0 TB");
+    assert_eq!(human_bytes(5_000 * 1024 * 1024 * 1024 * 1024), "5000 TB");
     assert_eq!(human_chunk(33_554_432), "32 MiB");
-    assert_eq!(human_chunk(5_000_000), "5.0 MB");
+    assert_eq!(human_chunk(5_000_000), "4.8 MB");
     assert_eq!(human_duration(0.4), "0s");
     assert_eq!(human_duration(59.0), "59s");
     assert_eq!(human_duration(75.0), "1m15s");
@@ -157,9 +166,9 @@ fn progress_line_shows_bytes_files_rate_and_eta() {
     colored::control::set_override(false);
     let line = progress_line(200_000_000, 400_000_000, 3, 7, 10_000_000.0);
     assert!(line.contains(" 50.0%"), "{line}");
-    assert!(line.contains("200.0 MB / 400.0 MB"), "{line}");
+    assert!(line.contains("191 MB / 381 MB"), "{line}");
     assert!(line.contains("3/7 files"), "{line}");
-    assert!(line.contains("10.0 MB/s"), "{line}");
+    assert!(line.contains("9.5 MB/s"), "{line}");
     assert!(line.contains("ETA 20s"), "{line}");
     assert_eq!(line.matches('█').count(), 10);
     assert_eq!(line.matches('░').count(), 10);

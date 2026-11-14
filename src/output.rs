@@ -289,9 +289,89 @@ pub fn confirm(action: &str, yes: bool) -> bool {
 /// Width that fits a full 36-character UUID plus padding.
 pub const ID_W: usize = 38;
 
+/// Columns of the terminal stdout is attached to; `None` when it is a pipe or
+/// a file, where there is no width to fit.
+pub fn term_width() -> Option<usize> {
+    terminal_size::terminal_size().map(|(w, _)| usize::from(w.0))
+}
+
+/// Width for the one column of a list table that may grow — the name.
+///
+/// `min` is the width the table had when it was fixed, and what it keeps when
+/// there is no terminal or the terminal is too narrow: a table never gets
+/// narrower than before. `fixed` is what every other column takes together
+/// (see [`fixed_width`]), `longest` the longest value in the column, so a wide
+/// terminal does not stretch the table past what the names need.
+pub fn flex_width(min: usize, fixed: usize, longest: usize, term: Option<usize>) -> usize {
+    let Some(term) = term else {
+        return min;
+    };
+    // One column spare: a row that ends exactly at the edge wraps on some terminals.
+    let available = term.saturating_sub(fixed + 1);
+    available.min(longest).max(min)
+}
+
+/// What the other columns of a table take: the 4-space indent, each width, and
+/// one separating space per column (the flexible one's included).
+pub fn fixed_width(others: &[usize]) -> usize {
+    4 + others.iter().sum::<usize>() + others.len()
+}
+
+/// Longest value of a column, in characters.
+pub fn longest<'a>(values: impl Iterator<Item = &'a str>) -> usize {
+    values.map(|v| v.chars().count()).max().unwrap_or(0)
+}
+
+/// The status cell of a robot: `expected` is the wording for a robot that is
+/// on the fleet but has never connected (`Robot::expected_label`), which must
+/// not read as the red "offline" of a robot that dropped out.
+pub fn robot_status(status: &str, expected: Option<&str>) -> String {
+    match expected {
+        Some(label) => format!("{} {}", "○".bright_black(), label.bright_black()),
+        None => status_indicator(status),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn flex_width_keeps_the_old_width_without_a_terminal_or_on_a_narrow_one() {
+        // Piped output: no width to fit, so the table is what it always was.
+        assert_eq!(flex_width(26, 100, 44, None), 26);
+        // An 80-column terminal the fixed columns already overflow.
+        assert_eq!(flex_width(26, 100, 44, Some(80)), 26);
+        assert_eq!(flex_width(26, 100, 44, Some(0)), 26);
+    }
+
+    #[test]
+    fn flex_width_grows_to_the_terminal_but_not_past_the_longest_name() {
+        // Room for 39 columns of name (one spare), names need 44: use the room.
+        assert_eq!(flex_width(26, 100, 44, Some(140)), 39);
+        // Room for more than the names need: stop at the longest name.
+        assert_eq!(flex_width(26, 100, 44, Some(200)), 44);
+        // Short names never shrink the column below its minimum.
+        assert_eq!(flex_width(26, 100, 9, Some(200)), 26);
+    }
+
+    #[test]
+    fn fixed_width_counts_indent_columns_and_separators() {
+        assert_eq!(fixed_width(&[38, 14, 11, 9, 9, 14]), 4 + 95 + 6);
+        assert_eq!(longest(["ab", "Apple — G1", ""].into_iter()), 10);
+        assert_eq!(longest(std::iter::empty()), 0);
+    }
+
+    #[test]
+    fn an_expected_robot_is_not_drawn_as_offline() {
+        colored::control::set_override(false);
+        assert_eq!(
+            robot_status("offline", Some("not connected")),
+            "○ not connected"
+        );
+        assert_eq!(robot_status("offline", None), "● offline");
+        colored::control::unset_override();
+    }
 
     /// The pre-audit `truncate` sliced by byte index, so any name longer than
     /// the limit whose cut landed inside a multi-byte character panicked with
