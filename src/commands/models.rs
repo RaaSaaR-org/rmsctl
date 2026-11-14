@@ -72,7 +72,9 @@ pub async fn run(cmd: &ModelsCommand, client: &ApiClient, ctx: &Ctx) -> RmsResul
             model_upload::status(client, ctx, id.as_deref()).await
         }
         ModelsCommand::UploadCancel { id } => model_upload::cancel(client, ctx, id, None).await,
-        ModelsCommand::Files { id } => model_upload::files(client, ctx, id).await,
+        ModelsCommand::Files { id } => {
+            model_upload::files(client, ctx, &resolve_id(client, id).await?).await
+        }
         ModelsCommand::Download {
             id,
             out,
@@ -89,6 +91,7 @@ pub async fn run(cmd: &ModelsCommand, client: &ApiClient, ctx: &Ctx) -> RmsResul
                 kind: dataset_download::Kind::Model,
                 id: resolve_id(client, id).await?,
                 out: out.clone(),
+                include: Vec::new(),
                 parallel: *parallel as usize,
                 retries: *retries,
                 resume: *resume,
@@ -325,15 +328,19 @@ async fn list(client: &ApiClient, ctx: &Ctx) -> RmsResult<()> {
         return Ok(());
     }
 
-    // NAME grows with the terminal; the other columns keep their widths.
+    // NAME grows with the terminal; the other columns keep their widths. On a
+    // terminal the full table does not fit, ids are cut to 8 characters, which
+    // show, files and download resolve.
+    let term = output::term_width();
+    let (id_w, name_min) = id_layout(output::fixed_width(&[output::ID_W, 14, 11, 9, 9, 14]), term);
     let name_w = output::flex_width(
-        26,
-        output::fixed_width(&[output::ID_W, 14, 11, 9, 9, 14]),
+        name_min,
+        output::fixed_width(&[id_w, 14, 11, 9, 9, 14]),
         output::longest(resp.model_versions.iter().filter_map(|m| m.name.as_deref())),
-        output::term_width(),
+        term,
     );
     output::table_header(&[
-        ("ID", output::ID_W),
+        ("ID", id_w),
         ("NAME", name_w),
         ("VERSION", 14),
         ("BASE", 11),
@@ -344,7 +351,7 @@ async fn list(client: &ApiClient, ctx: &Ctx) -> RmsResult<()> {
     for m in &resp.model_versions {
         println!(
             "    {} {} {} {} {} {} {}",
-            output::pad(&m.id, output::ID_W),
+            output::pad(&output::id_cell(&m.id, id_w), id_w),
             output::pad(
                 &output::truncate(m.name.as_deref().unwrap_or("-"), name_w),
                 name_w
@@ -382,6 +389,13 @@ async fn list(client: &ApiClient, ctx: &Ctx) -> RmsResult<()> {
         total,
         resp.pagination.as_ref().and_then(|p| p.total_pages()),
     );
+
+    if id_w < output::ID_W {
+        output::info(&format!(
+            "IDs cut to {} characters; show, files and download take them.",
+            output::SHORT_ID_W
+        ));
+    }
 
     // count_paged offers --page/--limit when the envelope reports more rows
     // than were printed; on this route neither flag can reach them.
@@ -688,14 +702,16 @@ fn render_relations(m: &ModelVersionRow) {
 /// Shared table for the relation lists (children, ancestors) — every one of
 /// them is a full model-version row.
 fn render_row_table(rows: &[ModelVersionRow]) {
+    let term = output::term_width();
+    let (id_w, name_min) = id_layout(output::fixed_width(&[output::ID_W, 10, 14]), term);
     let name_w = output::flex_width(
-        26,
-        output::fixed_width(&[output::ID_W, 10, 14]),
+        name_min,
+        output::fixed_width(&[id_w, 10, 14]),
         output::longest(rows.iter().filter_map(|r| r.name.as_deref())),
-        output::term_width(),
+        term,
     );
     output::table_header(&[
-        ("ID", output::ID_W),
+        ("ID", id_w),
         ("NAME", name_w),
         ("VERSION", 10),
         ("STATUS", 14),
@@ -703,7 +719,7 @@ fn render_row_table(rows: &[ModelVersionRow]) {
     for r in rows {
         println!(
             "    {} {} {} {}",
-            output::pad(&r.id, output::ID_W),
+            output::pad(&output::id_cell(&r.id, id_w), id_w),
             output::pad(
                 &output::truncate(r.name.as_deref().unwrap_or("-"), name_w),
                 name_w
@@ -714,6 +730,17 @@ fn render_row_table(rows: &[ModelVersionRow]) {
             ),
             deployment_indicator(r.deployment_status.as_deref().unwrap_or("unknown")),
         );
+    }
+}
+
+/// ID width and NAME minimum of a model table whose other columns take
+/// `fixed` with full ids: full ids and 26 when that fits the terminal (or
+/// there is none), else 8-character ids and a narrower NAME.
+fn id_layout(fixed: usize, term: Option<usize>) -> (usize, usize) {
+    if output::too_narrow(fixed, 26, term) {
+        (output::SHORT_ID_W, output::NARROW_NAME_MIN)
+    } else {
+        (output::ID_W, 26)
     }
 }
 
@@ -1102,7 +1129,9 @@ fn fmt_num(v: f64) -> String {
 /// or by version string anywhere. A non-UUID argument is therefore matched
 /// against the collection here. Names and versions are not unique (the live
 /// registry holds two rows at version "2.0.0"), so an ambiguous match refuses
-/// and lists the candidates instead of silently picking one.
+/// and lists the candidates instead of silently picking one. An id prefix of
+/// 8 or more characters (what a narrow `models list` prints) is matched the
+/// same way.
 async fn resolve_id(client: &ApiClient, ident: &str) -> RmsResult<String> {
     if looks_like_uuid(ident) {
         return Ok(ident.to_string());
@@ -1133,6 +1162,7 @@ async fn resolve_pair(client: &ApiClient, a: &str, b: &str) -> RmsResult<(String
 
 fn match_ident(rows: &[ModelVersionRow], ident: &str) -> RmsResult<String> {
     let needle = ident.trim().to_lowercase();
+    let prefix = output::is_id_prefix(ident.trim());
     let hits: Vec<&ModelVersionRow> = rows
         .iter()
         .filter(|r| {
@@ -1142,13 +1172,14 @@ fn match_ident(rows: &[ModelVersionRow], ident: &str) -> RmsResult<String> {
                 || r.name
                     .as_deref()
                     .is_some_and(|n| n.to_lowercase() == needle)
+                || (prefix && r.id.to_lowercase().starts_with(&needle))
         })
         .collect();
 
     match hits.as_slice() {
         [one] => Ok(one.id.clone()),
         [] => Err(RmsError::InvalidInput(format!(
-            "no model version named or versioned '{ident}' — pass a UUID id from 'rmsctl models list'"
+            "no model version named or versioned '{ident}', and no id starts with it — pass an id from 'rmsctl models list'"
         ))),
         many => {
             let candidates = many
@@ -1191,6 +1222,55 @@ mod tests {
         let note = no_evaluation_note(&zeros, true).unwrap();
         assert!(note.starts_with("no evaluation runs recorded on this server"));
         assert!(note.contains("validation metrics below"));
+    }
+
+    fn rows(v: Value) -> Vec<ModelVersionRow> {
+        serde_json::from_value(v).unwrap()
+    }
+
+    #[test]
+    fn the_short_id_a_narrow_list_prints_resolves_to_the_model() {
+        let rows = rows(json!([
+            { "id": "1acdfc3c-6928-434c-9caa-002ce889bf7e", "name": "GR00T N1.7", "version": "g11-step-5000" },
+            { "id": "1acdfc3c-0000-434c-9caa-002ce889bf7e", "name": "Other", "version": "2.0.0" },
+            { "id": "77aa0000-6928-434c-9caa-002ce889bf7e", "name": "Third", "version": "2.0.0" },
+        ]));
+        assert_eq!(
+            match_ident(&rows, "77aa0000").unwrap(),
+            "77aa0000-6928-434c-9caa-002ce889bf7e"
+        );
+        assert_eq!(
+            match_ident(&rows, "1ACDFC3C-6928").unwrap(),
+            "1acdfc3c-6928-434c-9caa-002ce889bf7e"
+        );
+        // Names and versions still resolve.
+        assert_eq!(
+            match_ident(&rows, "g11-step-5000").unwrap(),
+            "1acdfc3c-6928-434c-9caa-002ce889bf7e"
+        );
+        let ambiguous = match_ident(&rows, "1acdfc3c").unwrap_err().to_string();
+        assert!(
+            ambiguous.contains("matches 2 model versions"),
+            "{ambiguous}"
+        );
+        let none = match_ident(&rows, "deadbeef").unwrap_err().to_string();
+        assert!(none.contains("no id starts with it"), "{none}");
+        // Shorter than 8 characters is not a prefix.
+        assert!(match_ident(&rows, "77aa").is_err());
+    }
+
+    #[test]
+    fn the_model_list_cuts_ids_only_on_a_terminal_it_does_not_fit() {
+        let fixed = output::fixed_width(&[output::ID_W, 14, 11, 9, 9, 14]);
+        assert_eq!(id_layout(fixed, None), (output::ID_W, 26));
+        assert_eq!(id_layout(fixed, Some(200)), (output::ID_W, 26));
+        assert_eq!(
+            id_layout(fixed, Some(120)),
+            (output::SHORT_ID_W, output::NARROW_NAME_MIN)
+        );
+        // Short ids: the table fits 120 columns with room for the name.
+        let short = output::fixed_width(&[output::SHORT_ID_W, 14, 11, 9, 9, 14]);
+        assert!(short + 1 + output::NARROW_NAME_MIN <= 120);
     }
 
     #[test]

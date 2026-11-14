@@ -321,6 +321,56 @@ pub fn fixed_width(others: &[usize]) -> usize {
     4 + others.iter().sum::<usize>() + others.len()
 }
 
+/// Characters an id is cut to when the full one does not fit the terminal.
+/// Commands that take an id resolve a unique prefix of this length or more.
+pub const SHORT_ID_W: usize = 8;
+
+/// The narrowest NAME column a narrow terminal gets once ids are short: a name
+/// cut shorter is better than a row that wraps.
+pub const NARROW_NAME_MIN: usize = 16;
+
+/// Whether a list table — `fixed` its other columns with full ids, `min` the
+/// name column's usual minimum — is wider than the terminal. Never true
+/// without a terminal: piped output keeps the full ids for scripts.
+pub fn too_narrow(fixed: usize, min: usize, term: Option<usize>) -> bool {
+    // The one spare column `flex_width` keeps as well.
+    term.is_some_and(|t| t < fixed + 1 + min)
+}
+
+/// An id for a cell `width` wide: the full id when it fits, else its first
+/// [`SHORT_ID_W`] characters.
+pub fn id_cell(id: &str, width: usize) -> String {
+    if width >= id.chars().count() {
+        id.to_string()
+    } else {
+        id.chars().take(SHORT_ID_W.min(width)).collect()
+    }
+}
+
+/// Whether `ident` may be an id prefix: [`SHORT_ID_W`] to 35 characters of
+/// hex digits and dashes. Anything else is passed on as it was typed.
+pub fn is_id_prefix(ident: &str) -> bool {
+    let n = ident.chars().count();
+    (SHORT_ID_W..36).contains(&n) && ident.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
+}
+
+/// The one id among `ids` that starts with `prefix`, or `Err` with the
+/// candidates (none, or more than one). Case-insensitive, as ids are hex.
+pub fn match_id_prefix<'a>(
+    ids: impl Iterator<Item = &'a str>,
+    prefix: &str,
+) -> Result<String, Vec<String>> {
+    let needle = prefix.to_ascii_lowercase();
+    let hits: Vec<String> = ids
+        .filter(|id| id.to_ascii_lowercase().starts_with(&needle))
+        .map(String::from)
+        .collect();
+    match hits.as_slice() {
+        [one] => Ok(one.clone()),
+        _ => Err(hits),
+    }
+}
+
 /// Longest value of a column, in characters.
 pub fn longest<'a>(values: impl Iterator<Item = &'a str>) -> usize {
     values.map(|v| v.chars().count()).max().unwrap_or(0)
@@ -364,6 +414,63 @@ mod tests {
         assert_eq!(fixed_width(&[38, 14, 11, 9, 9, 14]), 4 + 95 + 6);
         assert_eq!(longest(["ab", "Apple — G1", ""].into_iter()), 10);
         assert_eq!(longest(std::iter::empty()), 0);
+    }
+
+    #[test]
+    fn a_table_is_too_narrow_only_on_a_terminal_it_does_not_fit() {
+        // datasets list with full ids: 100 columns fixed, NAME at least 26.
+        assert!(too_narrow(100, 26, Some(80)));
+        assert!(too_narrow(100, 26, Some(120)));
+        assert!(!too_narrow(100, 26, Some(127)));
+        assert!(!too_narrow(100, 26, Some(200)));
+        // Piped: no terminal, full ids.
+        assert!(!too_narrow(100, 26, None));
+    }
+
+    #[test]
+    fn an_id_is_cut_to_eight_characters_only_when_the_cell_is_short() {
+        let id = "9923225e-9d0a-463f-b072-eeded251142a";
+        assert_eq!(id_cell(id, ID_W), id);
+        assert_eq!(id_cell(id, 36), id);
+        assert_eq!(id_cell(id, SHORT_ID_W), "9923225e");
+        // A non-UUID id that fits is left alone.
+        assert_eq!(id_cell("robot-1", SHORT_ID_W), "robot-1");
+    }
+
+    #[test]
+    fn an_id_prefix_is_eight_or_more_hex_characters_and_not_a_whole_uuid() {
+        assert!(is_id_prefix("9923225e"));
+        assert!(is_id_prefix("9923225e-9d0a"));
+        assert!(is_id_prefix("9923225E"));
+        assert!(!is_id_prefix("9923225"));
+        assert!(!is_id_prefix("9923225e-9d0a-463f-b072-eeded251142a"));
+        assert!(!is_id_prefix("bottle-sorting"));
+        assert!(!is_id_prefix("g11-step-5000"));
+    }
+
+    #[test]
+    fn a_prefix_resolves_to_one_id_or_names_the_candidates() {
+        let ids = [
+            "9923225e-9d0a-463f-b072-eeded251142a",
+            "9b7c63ca-fc76-4dd1-aed2-2dada9bdcb64",
+            "9b7c63ca-0000-4dd1-aed2-2dada9bdcb64",
+        ];
+        assert_eq!(
+            match_id_prefix(ids.iter().copied(), "9923225E"),
+            Ok(ids[0].to_string())
+        );
+        assert_eq!(
+            match_id_prefix(ids.iter().copied(), "9b7c63ca"),
+            Err(vec![ids[1].to_string(), ids[2].to_string()])
+        );
+        assert_eq!(
+            match_id_prefix(ids.iter().copied(), "9b7c63ca-fc76"),
+            Ok(ids[1].to_string())
+        );
+        assert_eq!(
+            match_id_prefix(ids.iter().copied(), "deadbeef"),
+            Err(vec![])
+        );
     }
 
     #[test]

@@ -35,6 +35,7 @@ use crate::client::{ApiClient, RawResponse};
 use crate::ctx::Ctx;
 use crate::error::{RmsError, RmsResult};
 use crate::output;
+use colored::Colorize;
 use futures_util::{StreamExt, stream};
 use reqwest::Method;
 use serde::Deserialize;
@@ -88,6 +89,14 @@ impl Kind {
         }
     }
 
+    /// The word for it at the start of a heading.
+    fn title(self) -> &'static str {
+        match self {
+            Kind::Dataset => "Dataset",
+            Kind::Model => "Model",
+        }
+    }
+
     /// The path of the thing itself; its files are at `<base>/files`.
     fn base(self, id: &str) -> String {
         match self {
@@ -120,6 +129,8 @@ pub struct DownloadOptions {
     pub id: String,
     /// Where the dataset directory goes. `None`: `./<dataset name>`.
     pub out: Option<PathBuf>,
+    /// Fetch only the listed files matching one of these (`--include`); empty: all.
+    pub include: Vec<String>,
     pub parallel: usize,
     pub retries: u32,
     /// Continue in a directory that already holds part of the dataset.
@@ -333,6 +344,92 @@ pub(super) async fn fetch_manifest(
         }
     }
     Ok(Manifest { files, storage })
+}
+
+// ── files ───────────────────────────────────────────────────────────────
+
+/// `datasets files <id>` and `models files <id>`: what the instance stores,
+/// one row per file (path, size, the start of the SHA-256 where listed),
+/// read from every page of the manifest.
+pub async fn files(client: &ApiClient, ctx: &Ctx, kind: Kind, id: &str) -> RmsResult<()> {
+    let tuning = Tuning::default();
+    if ctx.json {
+        // The server's own body: the first page, which is all of anything up to 1000 files.
+        let r = control(
+            client,
+            Method::GET,
+            &format!("{}/files", kind.base(id)),
+            None,
+            true,
+            &tuning,
+        )
+        .await?;
+        if !r.is_success() {
+            return Err(api_error(&r));
+        }
+        return output::json_out(&r.json());
+    }
+    let manifest = fetch_manifest(client, kind, id, &tuning).await?;
+    let total: u64 = manifest.files.iter().map(|f| f.size).sum();
+
+    output::section("◈", &format!("{} files: {}", kind.title(), id.bold()));
+    if let Some(s) = &manifest.storage {
+        output::field("Store", s);
+    }
+    output::field(
+        "Total",
+        &format!("{} in {} file(s)", human_bytes(total), manifest.files.len()),
+    );
+    println!();
+    let path_w = files_path_width(
+        output::term_width(),
+        output::longest(manifest.files.iter().map(|f| f.path.as_str())),
+    );
+    output::table_header(&[("PATH", path_w), ("SIZE", 10), ("SHA-256", 14)]);
+    for f in &manifest.files {
+        println!(
+            "    {} {} {}",
+            output::pad(&output::truncate(&f.path, path_w), path_w),
+            output::pad(&human_bytes(f.size), 10),
+            f.sha256
+                .as_deref()
+                .map(|s| &s[..s.len().min(12)])
+                .unwrap_or("-")
+        );
+    }
+    println!();
+    output::info(&format!(
+        "Download: rmsctl {} download {id} --out <dir>",
+        kind.group()
+    ));
+    println!();
+    Ok(())
+}
+
+/// PATH of the files table: 56 without a terminal (what it always was), else
+/// as wide as the longest path the terminal leaves room for, at least 24.
+pub(super) fn files_path_width(term: Option<usize>, longest: usize) -> usize {
+    match term {
+        None => 56,
+        Some(_) => output::flex_width(24, output::fixed_width(&[10, 14]), longest, term),
+    }
+}
+
+/// The manifest entries `--include` keeps: those matching any pattern, by the
+/// gitignore-style rules of `--exclude` (`model_upload::excluded`). No
+/// pattern keeps everything.
+pub(super) fn included(files: Vec<RemoteEntry>, include: &[String]) -> Vec<RemoteEntry> {
+    if include.is_empty() {
+        return files;
+    }
+    files
+        .into_iter()
+        .filter(|f| {
+            include
+                .iter()
+                .any(|p| super::model_upload::excluded(p, &f.path))
+        })
+        .collect()
 }
 
 /// Percent-encode a query value: everything but unreserved characters.
@@ -770,10 +867,23 @@ pub async fn download(
         )));
     }
 
-    let manifest = fetch_manifest(client, kind, id, tuning).await?;
+    let mut manifest = fetch_manifest(client, kind, id, tuning).await?;
     if manifest.files.is_empty() {
         return Err(RmsError::Other(format!(
             "the server lists no files for {noun} {id}"
+        )));
+    }
+    // `--include`: from here on the manifest is the files asked for, so the
+    // fetch, the checks and the final "every listed file is on disk" cover
+    // exactly those.
+    let listed = manifest.files.len();
+    manifest.files = included(manifest.files, &opts.include);
+    if manifest.files.is_empty() {
+        return Err(RmsError::InvalidInput(format!(
+            "no file of the {listed} the server lists for {noun} {id} matches --include {} — \
+             see 'rmsctl {} files {id}'",
+            opts.include.join(" --include "),
+            kind.group()
         )));
     }
     // Check every path before the first byte is written.
@@ -839,6 +949,16 @@ pub async fn download(
                 .unwrap_or_default()
         ),
     );
+    if !opts.include.is_empty() {
+        ui.field(
+            "Included",
+            &format!(
+                "{} of {listed} files, by --include {}",
+                manifest.files.len(),
+                opts.include.join(" --include ")
+            ),
+        );
+    }
     ui.field(
         "Verified by",
         &if opts.no_checksum || with_sha == 0 {

@@ -51,6 +51,26 @@ wird das plattformspezifische Config-Verzeichnis als Fallback geprueft (macOS:
 --token <jwt>    Auth-Token
 ```
 
+Ist der Server nicht erreichbar, nennt der Hinweis die Health-URL des Servers, der
+tatsaechlich gefragt wurde (aus `--server`, `RMS_SERVER_URL` oder der Konfigurationsdatei),
+und die Fehlermeldung den Grund (DNS, Verbindung abgelehnt, TLS).
+
+### Schmale Terminals und kurze IDs
+
+`datasets list` und `models list` passen sich der Terminalbreite an. Passt die Tabelle
+mit vollen IDs nicht (bei `datasets list` unter 127 Spalten), werden die IDs auf 8
+Zeichen gekuerzt und `datasets list` laesst die Spalte KIND weg, wenn alle Zeilen
+dieselbe Art haben; die Fusszeile sagt beides. Diese kurzen IDs nehmen `datasets show`,
+`episodes`, `files`, `download` sowie `models show`, `files`, `download` an: ein
+eindeutiger Anfang von mindestens 8 Zeichen wird ueber die Liste aufgeloest; passt er auf
+keine oder mehrere IDs, bricht der Befehl mit den Kandidaten ab. In eine Pipe oder Datei
+geht immer die volle Tabelle mit vollen IDs.
+
+```bash
+rmsctl datasets show 9923225e
+rmsctl datasets files 9923225e
+```
+
 ### Der `--yes`-Schalter
 
 Jeder Befehl, der Flotten- oder Deployment-Zustand aendert, beschreibt ohne `--yes`
@@ -158,7 +178,9 @@ rmsctl datasets upload <dir> [--name X]          # Datensatz-Verzeichnis direkt 
 rmsctl datasets verify <id> <dir>                # Pruefen, dass alles aus <dir> auf der Instanz liegt (vor dem Loeschen!)
 rmsctl datasets upload-status <id>               # Was der Server von einem Upload haelt
 rmsctl datasets upload-cancel <id>               # Upload abbrechen, Gespeichertes loeschen
+rmsctl datasets files <id>                       # Dateien, die die Instanz zu einem Datensatz speichert
 rmsctl datasets download <id> [--out <dir>]      # Datensatz als LeRobot-Verzeichnis zurueckholen
+rmsctl datasets download <id> --include <glob>   # Nur passende Dateien holen (wiederholbar)
 rmsctl datasets flagged <id>                     # Markierte Episoden
 rmsctl datasets flag <id> <index> [--reason X]
 
@@ -373,6 +395,7 @@ braucht deshalb kein `--yes`.
 | Flag | Bedeutung |
 | --- | --- |
 | `--out <dir>`, `-o` | Zielverzeichnis (Default: `./<Datensatzname>`) |
+| `--include <glob>` | Nur Dateien holen, die passen: `meta/info.json`, `*.parquet`, `videos` (wiederholbar; dieselben Regeln wie `--exclude` beim Upload) |
 | `--parallel <n>` | Gleichzeitig geholte Dateien (Default 4, max. 16) |
 | `--retries <n>` | Versuche pro Datei nach voruebergehenden Fehlern, mit Backoff (Default 8) |
 | `--resume` | In einem nicht leeren Verzeichnis weitermachen: vollstaendige Dateien behalten, angefangene fortsetzen |
@@ -382,6 +405,12 @@ braucht deshalb kein `--yes`.
 
 - **Nicht leeres Verzeichnis:** wird ohne `--resume` oder `--force` abgelehnt (Exit 1),
   bevor irgendetwas geholt wird.
+- **Teilweise holen:** Mit `--include` wird die Dateiliste vor dem Holen gefiltert; nur
+  die passenden Dateien werden geholt und geprueft, und Exit 0 heisst "jede passende
+  Datei liegt vollstaendig da". Passt keine Datei, endet der Befehl mit Exit 1, ohne
+  etwas anzulegen. Was es gibt, zeigt `rmsctl datasets files <id>`. Eine so geholte
+  Kopie ist unvollstaendig: `datasets verify` vergleicht immer den ganzen Datensatz und
+  meldet die fehlenden Dateien.
 - **Fortsetzen:** Eine Datei heisst `<name>.rmsctl-part`, solange sie unvollstaendig ist,
   und bekommt ihren richtigen Namen erst, wenn Groesse (und SHA-256) stimmen. Nach einem
   Abbruch (Ctrl-C, Netz weg, `kill -9`) denselben Befehl mit `--resume` ausfuehren:

@@ -24,7 +24,7 @@
 //! request carries what the registry will say about the model, and the verdict
 //! is a registered model version rather than a validated dataset.
 
-use super::dataset_download::{Kind, fetch_manifest};
+use super::dataset_download::Kind;
 use super::dataset_upload::{
     LocalFile, MIN_CHUNK_BYTES, Plan, Progress, RemoteFile, SendOptions, StateStore, Tuning, Ui,
     api_error, build_plan, control, forget_dataset, human_bytes, human_chunk, human_duration,
@@ -1259,55 +1259,10 @@ pub async fn cancel(
 
 // ── files ───────────────────────────────────────────────────────────────
 
-/// `models files <id>`: what the instance stores for a model.
+/// `models files <id>`: what the instance stores for a model — the table
+/// `datasets files` prints too (`dataset_download::files`).
 pub async fn files(client: &ApiClient, ctx: &Ctx, id: &str) -> RmsResult<()> {
-    let tuning = Tuning::default();
-    if ctx.json {
-        // The server's own body: the first page, which is all of a model of up to 1000 files.
-        let r = control(
-            client,
-            Method::GET,
-            &format!("/models/versions/{id}/files"),
-            None,
-            true,
-            &tuning,
-        )
-        .await?;
-        if !r.is_success() {
-            return Err(api_error(&r));
-        }
-        return output::json_out(&r.json());
-    }
-    let manifest = fetch_manifest(client, Kind::Model, id, &tuning).await?;
-    let total: u64 = manifest.files.iter().map(|f| f.size).sum();
-
-    output::section("◈", &format!("Model files: {}", id.bold()));
-    if let Some(s) = &manifest.storage {
-        output::field("Store", s);
-    }
-    output::field(
-        "Total",
-        &format!("{} in {} file(s)", human_bytes(total), manifest.files.len()),
-    );
-    println!();
-    output::table_header(&[("PATH", 56), ("SIZE", 10), ("SHA-256", 14)]);
-    for f in &manifest.files {
-        println!(
-            "    {} {} {}",
-            output::pad(&output::truncate(&f.path, 56), 56),
-            output::pad(&human_bytes(f.size), 10),
-            f.sha256
-                .as_deref()
-                .map(|s| &s[..s.len().min(12)])
-                .unwrap_or("-")
-        );
-    }
-    println!();
-    output::info(&format!(
-        "Download: rmsctl models download {id} --out <dir>"
-    ));
-    println!();
-    Ok(())
+    super::dataset_download::files(client, ctx, Kind::Model, id).await
 }
 
 #[cfg(test)]

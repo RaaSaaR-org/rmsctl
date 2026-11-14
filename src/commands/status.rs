@@ -552,14 +552,17 @@ fn render_units(robots: &[Robot], latched_ids: &HashSet<&str>) {
     }
 
     output::section("◈", "Registered Units");
+    // ID is as wide as the longest id (at most a UUID's 38): robot ids such as
+    // `sim-robot-001` are short, and a fixed 38 made the table wrap at 120.
+    let id_w = units_id_width(robots.iter().map(|r| r.id.as_str()));
     let name_w = output::flex_width(
         20,
-        output::fixed_width(&[output::ID_W, 20, 5, 14, 17]),
+        output::fixed_width(&[id_w, 20, 5, 14, 17]),
         output::longest(robots.iter().filter_map(|r| r.name.as_deref())),
         output::term_width(),
     );
     output::table_header(&[
-        ("ID", output::ID_W),
+        ("ID", id_w),
         ("NAME", name_w),
         ("STATUS", 20),
         ("BATT", 5),
@@ -580,7 +583,7 @@ fn render_units(robots: &[Robot], latched_ids: &HashSet<&str>) {
         };
         println!(
             "    {} {} {} {} {} {}",
-            output::pad(&r.id, output::ID_W),
+            output::pad(&r.id, id_w),
             output::pad(&output::truncate(name, name_w), name_w),
             output::pad(&status, 20),
             output::pad(&batt, 5),
@@ -592,12 +595,18 @@ fn render_units(robots: &[Robot], latched_ids: &HashSet<&str>) {
         if let Some(task) = r.current_task_name.as_deref().filter(|t| !t.is_empty()) {
             println!(
                 "    {} {} {}",
-                " ".repeat(output::ID_W - 1),
+                " ".repeat(id_w.saturating_sub(1)),
                 "└".bright_black(),
                 format!("task: {}", output::truncate(task, 60)).bright_black()
             );
         }
     }
+}
+
+/// Width of the units table's ID column: the longest id, never narrower than
+/// the header and never wider than the full-UUID width it used to be.
+fn units_id_width<'a>(ids: impl Iterator<Item = &'a str>) -> usize {
+    output::longest(ids).clamp(2, output::ID_W)
 }
 
 // ── helpers ─────────────────────────────────────────────────────────────
@@ -635,6 +644,23 @@ fn short_time(ts: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_units_id_column_is_as_wide_as_the_ids() {
+        assert_eq!(
+            units_id_width(["sim-robot-001", "demo-microduck"].into_iter()),
+            14
+        );
+        assert_eq!(units_id_width(["a"].into_iter()), 2);
+        assert_eq!(
+            units_id_width(["9923225e-9d0a-463f-b072-eeded251142a"].into_iter()),
+            36
+        );
+        assert_eq!(units_id_width(std::iter::empty()), 2);
+        // The demo fleet's table now fits 120 columns with a 20-wide NAME.
+        let fixed = output::fixed_width(&[14, 20, 5, 14, 17]);
+        assert!(fixed + 1 + 20 <= 120);
+    }
 
     fn robot(id: &str, status: &str, provisioning: Option<&str>) -> Robot {
         let mut v = serde_json::json!({ "id": id, "status": status });

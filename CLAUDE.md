@@ -44,6 +44,10 @@ Config file format:
 }
 ```
 
+`load_config` keeps the server URL it resolved; the "is the server running?" hint of a
+network error names that server's `/health` (`config::health_probe_url`), and the error
+text carries reqwest's source chain (DNS failure, connection refused, TLS).
+
 `config.rs` checks `~/.config/rmsctl/config.json` first on every platform, then falls
 back to `dirs::config_dir()` (macOS: `~/Library/Application Support/rmsctl/config.json`).
 The XDG path comes first deliberately: it is what the docs promise and what anyone
@@ -75,16 +79,16 @@ src/
     updates.rs     # list, show, deployments, approve, deploy, rollback
     processes.rs   # list, show, instances, tasks, start, pause, resume, cancel, retry
     compliance.rs  # dashboard, deadlines, gaps, metrics, documents, training, inspections
-    datasets.rs    # list, show, episodes, quality, stats, validate, push, flagged, flag (dispatches upload/download)
+    datasets.rs    # list, show, episodes, quality, stats, validate, push, flagged, flag (dispatches upload/download/files); id-prefix lookup
     dataset_upload.rs        # datasets upload | upload-status | upload-cancel (direct upload)
     dataset_upload_tests.rs  # its tests, incl. a mock server that speaks the upload contract
-    dataset_download.rs      # datasets download — and models download (Kind::Model)
+    dataset_download.rs      # datasets download | files — and models download | files (Kind::Model)
     dataset_verify.rs        # datasets verify — a local directory against the instance's file list
     dataset_verify_tests.rs  # its tests, on the download tests' mock server
     dataset_download_tests.rs # its tests, incl. a mock server that speaks the download contract
     training.rs    # list, show, active, queue, workers, start, cancel, retry, export, estimate
     models.rs      # list, show, lineage, compare, delete — and the dispatch of upload/files/download
-    model_upload.rs        # models upload | upload-status | upload-cancel | files
+    model_upload.rs        # models upload | upload-status | upload-cancel (files: dataset_download)
     model_upload_tests.rs  # its tests, incl. a mock server that speaks the model contract
     deployments.rs # list, show, metrics, promote, rollback, cancel
     skills.rs      # list, show, for-robot, compatible, check, validate, publish, execute
@@ -231,6 +235,22 @@ must stay true:
   dataset and as a model to the same server keeps two notes.
 - **A new kind of download is a `Kind` variant, not a copy.** Paths and nouns go through
   `Kind`; nothing else in the engine may name a dataset.
+
+### Narrow terminals and short ids
+
+List tables fit the terminal stdout is attached to (`output::term_width`). When the full
+table would not fit (`output::too_narrow`), `datasets list` and `models list` print ids
+cut to `output::SHORT_ID_W` (8) characters, let NAME shrink to `NARROW_NAME_MIN`, and
+`datasets list` leaves KIND out when every row has the same kind; the footer says so.
+Without a terminal (pipe, file) nothing changes: full ids, full columns. Every short id
+printed must be usable: `datasets show | episodes | files | download` resolve an 8+
+character hex prefix through `GET /datasets` (`datasets::resolve_id`, all pages), and
+the models commands through `match_ident`. A prefix matching no id, or more than one, is
+an error naming the candidates — never a silent pick.
+
+`datasets download --include <glob>` filters the manifest before anything is fetched
+(matcher: `model_upload::excluded`); the fetch, the checks and the exit code then cover
+exactly the included files. `datasets verify` stays whole-dataset.
 
 ### Pagination honesty
 

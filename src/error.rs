@@ -62,8 +62,21 @@ impl RmsError {
 }
 
 impl From<reqwest::Error> for RmsError {
+    /// reqwest's own text is "error sending request for url (…)" whatever went
+    /// wrong; the cause — a DNS failure, a refused connection, a TLS error —
+    /// is in the source chain, so it is appended.
     fn from(e: reqwest::Error) -> Self {
-        RmsError::Network(e.to_string())
+        let mut message = e.to_string();
+        let mut source = std::error::Error::source(&e);
+        while let Some(cause) = source {
+            let text = cause.to_string();
+            if !text.is_empty() && !message.contains(&text) {
+                message.push_str(": ");
+                message.push_str(&text);
+            }
+            source = cause.source();
+        }
+        RmsError::Network(message)
     }
 }
 
@@ -74,3 +87,24 @@ impl From<serde_json::Error> for RmsError {
 }
 
 pub type RmsResult<T> = Result<T, RmsError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_network_error_says_why_the_request_failed() {
+        // Nothing listens on the discard port of the loopback interface here:
+        // the connection is refused, and the message has to say so rather
+        // than only "error sending request".
+        let e = reqwest::get("http://127.0.0.1:9/health").await.unwrap_err();
+        let RmsError::Network(message) = RmsError::from(e) else {
+            panic!("not a network error");
+        };
+        assert!(message.contains("127.0.0.1:9"), "{message}");
+        assert!(
+            message.to_lowercase().contains("refused"),
+            "the cause is missing: {message}"
+        );
+    }
+}

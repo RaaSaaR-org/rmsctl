@@ -668,6 +668,7 @@ fn download_options(out: &Path) -> DownloadOptions {
         kind: dataset_download::Kind::Model,
         id: UP.into(),
         out: Some(out.to_path_buf()),
+        include: Vec::new(),
         parallel: 2,
         retries: 3,
         resume: false,
